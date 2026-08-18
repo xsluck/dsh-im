@@ -1,7 +1,11 @@
-import { HarnessClient as SharedHarnessClient } from '../shared/harness-client.mjs';
+import { HarnessClient } from '../shared/harness-client.mjs';
 
-export class WecomHarnessClient extends SharedHarnessClient {
+export class WecomHarnessClient extends HarnessClient {
   constructor(options) {
-    super({ ...options, rpcPrefix: options.rpcPrefix ?? 'wecom' });
+    super({
+      ...options,
+      rpcIdPrefix: 'wecom',
+      logPrefix: 'dsh-wecom',
+    });
   }
 }

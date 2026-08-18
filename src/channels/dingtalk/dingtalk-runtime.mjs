@@ -280,7 +280,7 @@ export class DingtalkRuntime {
           }
           if (!message || typeof message !== 'object') return;
           this.#status.lastCallbackAt = Date.now();
-          void bridge.accept(message);
+          await bridge.accept(message);
         }).catch(() => {
           if (signal.aborted || this.#bridge !== bridge) return;
           this.#status.lastError = '钉钉消息处理失败。';

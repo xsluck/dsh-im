@@ -1,7 +1,11 @@
-import { HarnessClient as SharedHarnessClient } from '../shared/harness-client.mjs';
+import { HarnessClient } from '../shared/harness-client.mjs';
 
-export class QqHarnessClient extends SharedHarnessClient {
+export class QqHarnessClient extends HarnessClient {
   constructor(options) {
-    super({ ...options, rpcPrefix: options.rpcPrefix ?? 'qq' });
+    super({
+      ...options,
+      rpcIdPrefix: 'qq',
+      logPrefix: 'dsh-qq',
+    });
   }
 }

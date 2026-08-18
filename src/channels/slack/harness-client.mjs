@@ -1,7 +1,11 @@
-import { HarnessClient as SharedHarnessClient } from '../shared/harness-client.mjs';
+import { HarnessClient } from '../shared/harness-client.mjs';
 
-export class SlackHarnessClient extends SharedHarnessClient {
+export class SlackHarnessClient extends HarnessClient {
   constructor(options) {
-    super({ ...options, rpcPrefix: options.rpcPrefix ?? 'slack' });
+    super({
+      ...options,
+      rpcIdPrefix: 'slack',
+      logPrefix: 'dsh-slack',
+    });
   }
 }

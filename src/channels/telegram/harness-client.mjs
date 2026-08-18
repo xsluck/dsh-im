@@ -1,7 +1,11 @@
-import { HarnessClient as SharedHarnessClient } from '../shared/harness-client.mjs';
+import { HarnessClient } from '../shared/harness-client.mjs';
 
-export class TelegramHarnessClient extends SharedHarnessClient {
+export class TelegramHarnessClient extends HarnessClient {
   constructor(options) {
-    super({ ...options, rpcPrefix: options.rpcPrefix ?? 'telegram' });
+    super({
+      ...options,
+      rpcIdPrefix: 'telegram',
+      logPrefix: 'dsh-telegram',
+    });
   }
 }

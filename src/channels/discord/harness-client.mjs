@@ -1,7 +1,11 @@
-import { HarnessClient as SharedHarnessClient } from '../shared/harness-client.mjs';
+import { HarnessClient } from '../shared/harness-client.mjs';
 
-export class DiscordHarnessClient extends SharedHarnessClient {
+export class DiscordHarnessClient extends HarnessClient {
   constructor(options) {
-    super({ ...options, rpcPrefix: options.rpcPrefix ?? 'discord' });
+    super({
+      ...options,
+      rpcIdPrefix: 'discord',
+      logPrefix: 'dsh-discord',
+    });
   }
 }

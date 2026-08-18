@@ -1,6 +1,26 @@
 import { WeixinApiError } from './weixin-api.mjs';
 import { createWeixinBridgeStatus, WeixinHarnessBridge } from './weixin-bridge.mjs';
 
+const DEFAULT_START_RETRY_DELAYS_MS = Object.freeze([250, 1_000, 3_000]);
+
+function startRetryDelays(value) {
+  if (value === undefined) return [...DEFAULT_START_RETRY_DELAYS_MS];
+  if (!Array.isArray(value)) throw new TypeError('startRetryDelaysMs must be an array');
+  return value.map((wait) => {
+    if (!Number.isFinite(wait) || wait < 0) {
+      throw new TypeError('startRetryDelaysMs must contain non-negative delays');
+    }
+    return wait;
+  });
+}
+
+function retryableStartError(error) {
+  if (!(error instanceof WeixinApiError)) return false;
+  if (error.code === 'network-error' || error.code === 'timeout') return true;
+  return error.code === 'http-error'
+    && (error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500);
+}
+
 function delay(ms, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -42,6 +62,7 @@ export class WeixinRuntime {
   #logger;
   #replyTimeoutMs;
   #maxMessageChars;
+  #startRetryDelaysMs;
   #status = createWeixinRuntimeStatus();
   #bridge = null;
   #abortController = null;
@@ -57,6 +78,7 @@ export class WeixinRuntime {
     logger = console,
     replyTimeoutMs = 600_000,
     maxMessageChars = 4_000,
+    startRetryDelaysMs,
   }) {
     if (!api || !config || !token || !harness || !state) {
       throw new TypeError('WeixinRuntime requires API, account, token, Harness, and state');
@@ -69,6 +91,7 @@ export class WeixinRuntime {
     this.#logger = logger;
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#maxMessageChars = maxMessageChars;
+    this.#startRetryDelaysMs = startRetryDelays(startRetryDelaysMs);
   }
 
   get status() {
@@ -92,10 +115,9 @@ export class WeixinRuntime {
     try {
       await this.#harness.ensureRunning();
       this.#status.harnessReachable = true;
-      await this.#api.notifyStart({
-        baseUrl: this.#config.baseUrl,
-        token: this.#token,
-      });
+      await this.#notifyStart();
+      this.#abortController = new AbortController();
+      const signal = this.#abortController.signal;
       this.#bridge = new WeixinHarnessBridge({
         api: this.#api,
         baseUrl: this.#config.baseUrl,
@@ -107,12 +129,11 @@ export class WeixinRuntime {
         logger: this.#logger,
         replyTimeoutMs: this.#replyTimeoutMs,
         maxMessageChars: this.#maxMessageChars,
+        signal,
       });
-      this.#abortController = new AbortController();
       this.#status.ready = true;
       this.#status.weixinConnectionState = 'connected';
       this.#status.lastCheckedAt = Date.now();
-      const signal = this.#abortController.signal;
       this.#monitor = this.#runMonitor(signal).catch((error) => {
         if (signal.aborted) return;
         this.#status.ready = false;
@@ -122,10 +143,32 @@ export class WeixinRuntime {
       });
       return this.status;
     } catch (error) {
+      this.#abortController?.abort();
+      this.#abortController = null;
+      this.#bridge = null;
       this.#status.ready = false;
       this.#status.weixinConnectionState = 'failed';
       this.#status.lastError = error?.message ?? String(error);
       throw error;
+    }
+  }
+
+  async #notifyStart() {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.#api.notifyStart({
+          baseUrl: this.#config.baseUrl,
+          token: this.#token,
+        });
+      } catch (error) {
+        const wait = this.#startRetryDelaysMs[attempt];
+        if (wait === undefined || !retryableStartError(error)) throw error;
+        this.#logger.warn?.(
+          `[dsh-weixin] account ${this.#config.botId} start request failed; retrying in ${wait}ms:`,
+          error,
+        );
+        await delay(wait);
+      }
     }
   }
 
@@ -156,7 +199,13 @@ export class WeixinRuntime {
         this.#status.lastError = null;
 
         for (const message of response?.msgs ?? []) {
-          void this.#bridge.accept(message);
+          void this.#bridge.accept(message).catch((error) => {
+            if (signal.aborted) return;
+            this.#logger.error?.(
+              `[dsh-weixin] account ${this.#config.botId} message handling failed:`,
+              error,
+            );
+          });
         }
         if (typeof response?.get_updates_buf === 'string' && response.get_updates_buf) {
           await this.#state.setGetUpdatesBuf(response.get_updates_buf);

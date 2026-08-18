@@ -4,21 +4,19 @@ import { isAbsolute } from 'node:path';
 
 import { adoptRegisteredWorkspaceSession } from './harness-session-binding.mjs';
 
-const sleep = (ms, signal) => new Promise((resolve, reject) => {
-  if (signal?.aborted) {
-    reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-    return;
+// Every channel plugin runs in the same Host process. Sharing ownership by
+// Harness origin prevents two channel-specific clients bound to one Session
+// from claiming or cancelling each other's interactions.
+const interactionRegistries = new Map();
+
+function interactionRegistry(origin) {
+  let registry = interactionRegistries.get(origin);
+  if (!registry) {
+    registry = { ownerships: new Map(), claims: new Map(), nextOrder: 0 };
+    interactionRegistries.set(origin, registry);
   }
-  const timer = setTimeout(() => {
-    signal?.removeEventListener('abort', onAbort);
-    resolve();
-  }, ms);
-  const onAbort = () => {
-    clearTimeout(timer);
-    reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-  };
-  signal?.addEventListener('abort', onAbort, { once: true });
-});
+  return registry;
+}
 
 function workspacePaths(value) {
   if (!Array.isArray(value?.items)) return [];
@@ -68,12 +66,91 @@ function workspaceSessions(workspace, archivedSessionIds, sessionList) {
   };
 }
 
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function assistantMessageText(event) {
   return (event?.data?.message?.content ?? [])
     .filter((part) => part.type === 'text' && typeof part.text === 'string')
     .map((part) => part.text)
     .join('\n')
     .trim();
+}
+
+function consumeInteractionOwnership(ownership, entries) {
+  const ordered = [...entries]
+    .map((entry) => entry?.event ?? entry)
+    .filter(Boolean)
+    .sort((left, right) => (left.seq ?? -1) - (right.seq ?? -1));
+
+  for (const event of ordered) {
+    const seq = event.seq ?? -1;
+    if (seq <= ownership.lastSeq) continue;
+    ownership.lastSeq = seq;
+
+    if (event.type === 'turn/start') {
+      const turn = event.data?.turn ?? null;
+      if (ownership.active && turn !== ownership.turn) ownership.active = false;
+      if (ownership.turn !== null && turn !== ownership.turn) ownership.completed = true;
+      ownership.openTurn = turn;
+      continue;
+    }
+    if (event.type === 'user/message' && event.data?.source?.rpcId === ownership.promptRpcId) {
+      ownership.active = true;
+      ownership.started = true;
+      ownership.completed = false;
+      ownership.turn = event.data?.turn ?? ownership.openTurn;
+      continue;
+    }
+    if (event.type === 'turn/end' && event.data?.turn === ownership.turn) {
+      ownership.active = false;
+      ownership.completed = true;
+      continue;
+    }
+    let toolCall = null;
+    if (event.type === 'tool/call'
+      && ownership.active
+      && event.data?.turn === ownership.turn
+      && typeof event.data?.callId === 'string'
+      && event.data.callId) {
+      toolCall = {
+        callId: event.data.callId,
+        name: event.data?.name,
+        arguments: event.data?.arguments,
+      };
+    } else if (event.type === 'tool/code-dispatch-start'
+      && ownership.active
+      && typeof event.data?.subCallId === 'string'
+      && event.data.subCallId) {
+      let argumentsText;
+      try {
+        argumentsText = JSON.stringify(event.data?.arguments);
+      } catch {
+        argumentsText = undefined;
+      }
+      toolCall = {
+        callId: event.data.subCallId,
+        name: event.data?.name,
+        arguments: argumentsText,
+      };
+    }
+    if (toolCall) ownership.toolCalls.set(toolCall.callId, Object.freeze(toolCall));
+  }
 }
 
 export class HarnessReplyTracker {
@@ -101,6 +178,14 @@ export class HarnessReplyTracker {
 
   get reason() {
     return this.#reason;
+  }
+
+  get tracking() {
+    return this.#targetTurn !== null && !this.#finished;
+  }
+
+  get turn() {
+    return this.#targetTurn;
   }
 
   consume(entries) {
@@ -133,18 +218,6 @@ export class HarnessReplyTracker {
       }
       if (event.data?.turn !== this.#targetTurn) continue;
 
-      if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'block-end') {
-        const block = event.data.chunk?.block;
-        if (block?.type === 'text' && typeof block.text === 'string') {
-          const text = block.text.trim();
-          if (text && text !== this.#latestText) {
-            this.#latestText = text;
-            update = { type: 'text', text, source: 'message' };
-          }
-        }
-        continue;
-      }
-
       if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'text-delta') {
         const step = event.data?.step ?? 0;
         const index = event.data.chunk.index ?? 0;
@@ -159,7 +232,7 @@ export class HarnessReplyTracker {
           .trim();
         if (text && text !== this.#latestText) {
           this.#latestText = text;
-          update = { type: 'text', text, source: 'delta' };
+          update = { type: 'text', text };
         }
         continue;
       }
@@ -168,7 +241,7 @@ export class HarnessReplyTracker {
         const text = assistantMessageText(event);
         if (text && text !== this.#latestText) {
           this.#latestText = text;
-          update = { type: 'text', text, source: 'message' };
+          update = { type: 'text', text };
         }
         continue;
       }
@@ -193,6 +266,14 @@ export class HarnessRpcError extends Error {
   }
 }
 
+export class HarnessInteractionError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'HarnessInteractionError';
+    this.code = code;
+  }
+}
+
 export class HarnessClient {
   #baseUrl;
   #workspace;
@@ -200,9 +281,14 @@ export class HarnessClient {
   #autostart;
   #dshBin;
   #fetch;
-  #webSocket;
-  #rpcPrefix;
+  #createWebSocket;
+  #interactionReconnectDelayMs;
+  #rpcIdPrefix;
+  #logPrefix;
   #managedProcess = null;
+  #interactionRegistry;
+  #interactionOwnerships;
+  #interactionClaims;
 
   constructor({
     baseUrl,
@@ -211,21 +297,40 @@ export class HarnessClient {
     autostart = false,
     dshBin = 'dsh',
     fetchImpl = fetch,
-    webSocketImpl = globalThis.WebSocket,
-    rpcPrefix = 'dsh-im',
+    createWebSocket = (url) => new WebSocket(url),
+    interactionReconnectDelayMs = 500,
+    rpcIdPrefix = 'im',
+    logPrefix = 'dsh-im',
   }) {
+    if (typeof createWebSocket !== 'function') {
+      throw new TypeError('createWebSocket must be a function');
+    }
+    if (!Number.isFinite(interactionReconnectDelayMs) || interactionReconnectDelayMs < 0) {
+      throw new TypeError('interactionReconnectDelayMs must be a non-negative number');
+    }
+    if (typeof rpcIdPrefix !== 'string' || !rpcIdPrefix.trim()) {
+      throw new TypeError('rpcIdPrefix must be a non-empty string');
+    }
+    if (typeof logPrefix !== 'string' || !logPrefix.trim()) {
+      throw new TypeError('logPrefix must be a non-empty string');
+    }
     this.#baseUrl = new URL(baseUrl);
     this.#workspace = workspace;
     this.#agentPreset = agentPreset;
     this.#autostart = autostart;
     this.#dshBin = dshBin;
     this.#fetch = fetchImpl;
-    this.#webSocket = webSocketImpl;
-    this.#rpcPrefix = rpcPrefix;
+    this.#createWebSocket = createWebSocket;
+    this.#interactionReconnectDelayMs = interactionReconnectDelayMs;
+    this.#rpcIdPrefix = rpcIdPrefix.trim();
+    this.#logPrefix = logPrefix.trim();
+    this.#interactionRegistry = interactionRegistry(this.#baseUrl.origin);
+    this.#interactionOwnerships = this.#interactionRegistry.ownerships;
+    this.#interactionClaims = this.#interactionRegistry.claims;
   }
 
   async rpc(method, payload = {}, timeoutMs = 30_000, options = {}) {
-    const rpcId = options.rpcId ?? `${this.#rpcPrefix}-${randomUUID()}`;
+    const rpcId = options.rpcId ?? `${this.#rpcIdPrefix}-${randomUUID()}`;
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const signal = options.signal
       ? AbortSignal.any([options.signal, timeoutSignal])
@@ -243,17 +348,6 @@ export class HarnessClient {
     }
     if (!body.result?.ok) throw new HarnessRpcError(method, body.result?.error);
     return body.result.value;
-  }
-
-  async respond(message) {
-    const response = await this.#fetch(new URL('/api/respond', this.#baseUrl), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(message),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) throw new Error(`Harness respond failed: HTTP ${response.status}`);
-    return response.json();
   }
 
   async health(options = {}) {
@@ -278,7 +372,7 @@ export class HarnessClient {
         stdio: ['ignore', 'inherit', 'inherit'],
       });
       this.#managedProcess.on('error', (error) => {
-        console.error('[dsh-im] failed to start Harness:', error.message);
+        console.error(`[${this.#logPrefix}] failed to start Harness:`, error.message);
       });
     }
 
@@ -342,62 +436,233 @@ export class HarnessClient {
     }
   }
 
+  async respondInteraction(rpcId, result, options = {}) {
+    if (typeof rpcId !== 'string' || !rpcId) throw new TypeError('rpcId is required');
+    if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') {
+      throw new TypeError('A Harness RPC result is required');
+    }
+    const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? 30_000);
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, timeoutSignal])
+      : timeoutSignal;
+    const response = await this.#fetch(new URL('/api/respond', this.#baseUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-response', rpcId, result }),
+      signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Harness transport respond failed: HTTP ${response.status}`);
+    }
+    const receipt = await response.json();
+    if (receipt?.accepted === true) return receipt;
+    if (receipt?.accepted !== false
+      || (receipt.reason !== 'bad-response' && receipt.reason !== 'not-pending')) {
+      throw new Error('Harness returned an invalid interaction response receipt');
+    }
+    const reason = receipt.reason;
+    throw new HarnessInteractionError(
+      `interaction-${reason}`,
+      `Harness interaction response was rejected (${reason})`,
+    );
+  }
+
+  async watchInteractions(sessionId, {
+    signal,
+    onInteraction,
+    onResolved,
+    onOpen,
+    ownership,
+  } = {}) {
+    if (typeof sessionId !== 'string' || !sessionId) throw new TypeError('sessionId is required');
+    if (!signal || typeof signal.addEventListener !== 'function') {
+      throw new TypeError('watchInteractions requires an AbortSignal');
+    }
+    if (onInteraction !== undefined && typeof onInteraction !== 'function') {
+      throw new TypeError('onInteraction must be a function');
+    }
+    if (onResolved !== undefined && typeof onResolved !== 'function') {
+      throw new TypeError('onResolved must be a function');
+    }
+    if (onOpen !== undefined && typeof onOpen !== 'function') {
+      throw new TypeError('onOpen must be a function');
+    }
+
+    while (!signal.aborted) {
+      try {
+        await this.#watchInteractionSocket(sessionId, {
+          signal,
+          onInteraction,
+          onResolved,
+          onOpen,
+          ownership,
+        });
+      } catch (error) {
+        if (signal.aborted) return;
+        console.warn(`[${this.#logPrefix}] Harness interaction stream disconnected:`, error.message);
+      }
+      if (signal.aborted) return;
+      try {
+        await sleep(this.#interactionReconnectDelayMs, signal);
+      } catch {
+        if (signal.aborted) return;
+        throw new Error('Harness interaction reconnect wait failed');
+      }
+    }
+  }
+
+  #registerInteractionOwnership(sessionId, ownership) {
+    const owners = this.#interactionOwnerships.get(sessionId) ?? new Set();
+    ownership.order = this.#interactionRegistry.nextOrder;
+    this.#interactionRegistry.nextOrder += 1;
+    owners.add(ownership);
+    this.#interactionOwnerships.set(sessionId, owners);
+  }
+
+  #unregisterInteractionOwnership(sessionId, ownership) {
+    const owners = this.#interactionOwnerships.get(sessionId);
+    owners?.delete(ownership);
+    if (owners?.size === 0) this.#interactionOwnerships.delete(sessionId);
+    for (const [key, claim] of this.#interactionClaims) {
+      if (claim.ownership === ownership) this.#interactionClaims.delete(key);
+    }
+  }
+
+  #consumeInteractionOwnerships(sessionId, entries) {
+    for (const ownership of this.#interactionOwnerships.get(sessionId) ?? []) {
+      consumeInteractionOwnership(ownership, entries);
+    }
+  }
+
+  async #refreshInteractionOwnerships(sessionId, signal) {
+    const history = await this.rpc(
+      'session.history',
+      { sessionId, maxMessages: 50 },
+      30_000,
+      { signal },
+    );
+    this.#consumeInteractionOwnerships(sessionId, history.events ?? []);
+  }
+
+  #interactionOwner(sessionId, claimKey, kind) {
+    const claim = this.#interactionClaims.get(claimKey);
+    if (claim && this.#interactionOwnerships.get(sessionId)?.has(claim.ownership)) return claim;
+
+    const owners = [...(this.#interactionOwnerships.get(sessionId) ?? [])];
+    const active = owners
+      .filter((ownership) => ownership.active)
+      .sort((left, right) => left.order - right.order);
+    if (active.length > 0) return { ownership: active[0], recovered: false };
+
+    // A newly attached IM conversation may encounter a question left by
+    // an earlier runtime before its queued prompt starts. Let the oldest such
+    // ask adopt that replay so the Session can recover instead of deadlocking.
+    // Approval adopters receive recovered=true and must reject it without ever
+    // presenting it as approvable; the original actor/route cannot be proven
+    // after a runtime restart.
+    const ownership = owners
+      .filter((ownership) => !ownership.started && !ownership.completed)
+      .sort((left, right) => left.order - right.order)[0] ?? null;
+    return ownership ? { ownership, recovered: true } : null;
+  }
+
   async ask(sessionId, text, options = {}) {
     if (typeof options === 'number') options = { timeoutMs: options };
     const timeoutMs = options.timeoutMs ?? 600_000;
-    const approvalWaitMs = options.approvalWaitMs ?? 1_800_000;
     const signal = options.signal;
     const onUpdate = typeof options.onUpdate === 'function' ? options.onUpdate : null;
-    const onApproval = typeof options.onApproval === 'function' ? options.onApproval : null;
-    const onQuestion = typeof options.onQuestion === 'function' ? options.onQuestion : null;
+    const onInteraction = typeof options.onInteraction === 'function'
+      ? options.onInteraction
+      : undefined;
+    const onInteractionResolved = typeof options.onInteractionResolved === 'function'
+      ? options.onInteractionResolved
+      : undefined;
     await this.ensureRunning({ signal });
-    const before = await this.rpc('session.history', { sessionId, maxMessages: 1 }, 30_000, { signal });
+    const before = await this.rpc(
+      'session.history',
+      { sessionId, maxMessages: 1 },
+      30_000,
+      { signal },
+    );
     const baselineSeq = Math.max(-1, ...(before.events ?? []).map(({ event }) => event.seq ?? -1));
-    const promptRpcId = `${this.#rpcPrefix}-${randomUUID()}`;
+    const promptRpcId = `${this.#rpcIdPrefix}-${randomUUID()}`;
     const tracker = new HarnessReplyTracker({ promptRpcId, afterSeq: baselineSeq });
+    const interactionController = onInteraction || onInteractionResolved
+      ? new AbortController()
+      : null;
+    const interactionSignal = interactionController
+      ? (signal
+          ? AbortSignal.any([signal, interactionController.signal])
+          : interactionController.signal)
+      : null;
+    // The mux is host-global. A prompt RPC becomes the owner only when its
+    // durable user/message starts a turn, so two chats bound to one Session
+    // cannot answer each other's questions or approvals.
+    const ownership = interactionController
+      ? {
+          promptRpcId,
+          active: false,
+          started: false,
+          completed: false,
+          turn: null,
+          openTurn: null,
+          lastSeq: baselineSeq,
+          reconnect: null,
+          order: -1,
+          toolCalls: new Map(),
+        }
+      : null;
+    let interactionTask = null;
 
-    await this.rpc('session.prompt', {
-      sessionId,
-      mode: 'queue',
-      content: [{ type: 'text', text }],
-      clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    }, 30_000, { rpcId: promptRpcId, signal });
+    if (ownership) this.#registerInteractionOwnership(sessionId, ownership);
 
-    const approvalController = new AbortController();
-    const approvalSignal = signal === undefined
-      ? approvalController.signal
-      : AbortSignal.any([signal, approvalController.signal]);
-    let approvalPending = false;
-    let deadline = Date.now() + timeoutMs;
-    const approvalTask = onApproval || onQuestion
-      ? this.#pumpApprovals({
-          sessionId,
-          signal: approvalSignal,
-          onApproval,
-          onQuestion,
-          onPendingChange: (pending) => {
-            approvalPending = pending;
-            if (!pending) deadline = Math.max(deadline, Date.now() + 15_000);
-          },
-        })
-          .catch((error) => {
-            if (!approvalController.signal.aborted) {
-              console.warn('[dsh-im] approval stream unavailable:', error);
-            }
-          })
-      : Promise.resolve();
-
-    const approvalDeadline = Date.now() + approvalWaitMs;
     try {
-      while (Date.now() < deadline || (approvalPending && Date.now() < approvalDeadline)) {
+      if (interactionSignal) {
+        let markOpen;
+        const opened = new Promise((resolve) => { markOpen = resolve; });
+        interactionTask = this.watchInteractions(sessionId, {
+          signal: interactionSignal,
+          onInteraction,
+          onResolved: onInteractionResolved,
+          onOpen: markOpen,
+          ownership,
+        });
+        void interactionTask.catch(() => undefined);
+        await Promise.race([
+          opened,
+          sleep(30_000, interactionSignal).then(() => {
+            throw new Error('Harness interaction stream did not open within 30 seconds');
+          }),
+        ]);
+      }
+
+      await this.rpc('session.prompt', {
+        sessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text }],
+        clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      }, 30_000, { rpcId: promptRpcId, signal });
+
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
         await sleep(300, signal);
-        const history = await this.rpc('session.history', { sessionId, maxMessages: 50 }, 30_000, { signal });
+        const history = await this.rpc(
+          'session.history',
+          { sessionId, maxMessages: 50 },
+          30_000,
+          { signal },
+        );
+        const wasActive = ownership?.active === true;
+        if (ownership) {
+          this.#consumeInteractionOwnerships(sessionId, history.events ?? []);
+          if (!wasActive && ownership.active) ownership.reconnect?.();
+        }
         const update = tracker.consume(history.events ?? []);
         if (update && onUpdate) {
           try {
             await onUpdate(update);
           } catch (error) {
-            console.warn('[dsh-im] ignored a progress update failure:', error.message);
+            console.warn(`[${this.#logPrefix}] ignored a progress update failure:`, error.message);
           }
         }
         if (!tracker.finished) continue;
@@ -408,137 +673,184 @@ export class HarnessClient {
       }
       throw new Error(`Harness reply timed out after ${Math.round(timeoutMs / 1_000)} seconds`);
     } finally {
-      approvalController.abort();
-      await approvalTask;
+      interactionController?.abort(new DOMException('Harness turn finished', 'AbortError'));
+      if (interactionTask) await interactionTask.catch(() => undefined);
+      if (ownership) this.#unregisterInteractionOwnership(sessionId, ownership);
     }
   }
 
-  async #pumpApprovals({ sessionId, signal, onApproval, onQuestion, onPendingChange }) {
-    const WebSocketImpl = this.#webSocket;
-    if (typeof WebSocketImpl !== 'function') {
-      throw new Error('Harness approval streaming requires a WebSocket implementation (Node 22+ or the ws package)');
-    }
-    const muxUrl = new URL('/api/events.mux', this.#baseUrl);
-    if (muxUrl.protocol === 'https:') muxUrl.protocol = 'wss:';
-    else if (muxUrl.protocol === 'http:') muxUrl.protocol = 'ws:';
+  #watchInteractionSocket(sessionId, {
+    signal,
+    onInteraction,
+    onResolved,
+    onOpen,
+    ownership,
+  }) {
+    const url = new URL('/api/events.mux', this.#baseUrl);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 
-    let failures = 0;
-    while (!signal?.aborted) {
-      const socket = new WebSocketImpl(muxUrl.href);
-      const onAbort = () => socket.close();
-      signal?.addEventListener('abort', onAbort, { once: true });
-      let opened = false;
-      let liveStart = 0;
-      let lastError = null;
+    return new Promise((resolve, reject) => {
+      let socket;
       try {
-        await new Promise((resolve, reject) => {
-          socket.addEventListener('open', () => resolve(), { once: true });
-          socket.addEventListener('error', () => reject(new Error('Harness approval stream failed to open')), { once: true });
-        });
-        opened = true;
-        liveStart = Date.now();
-        await new Promise((resolve) => {
-          socket.addEventListener('close', () => resolve(), { once: true });
-          socket.addEventListener('error', () => resolve(), { once: true });
-          const seenApprovals = new Set();
-          const seenQuestions = new Set();
-          socket.addEventListener('message', async (event) => {
-            let envelope;
-            try {
-              envelope = JSON.parse(String(event.data));
-            } catch {
-              return;
-            }
-            if (envelope?.type !== 'server-request') return;
-            const frame = envelope.payload;
-            if (frame?.sessionId !== sessionId) return;
-            if (frame?.type === 'approval/requested') {
-              if (seenApprovals.has(frame.approvalId)) return;
-              seenApprovals.add(frame.approvalId);
-              try {
-                onPendingChange?.(true);
-                const outcome = await onApproval({
-                  rpcId: envelope.rpcId,
-                  approvalId: frame.approvalId,
-                  toolName: frame.toolName,
-                  reason: frame.reason,
-                  signal,
-                });
-                if (outcome === 'allowed-once' || outcome === 'rejected') {
-                  const body = {
-                    type: 'client-response',
-                    rpcId: envelope.rpcId,
-                    result: {
-                      ok: true,
-                      value: {
-                        sessionId,
-                        approvalId: frame.approvalId,
-                        outcome,
-                      },
-                    },
-                  };
-                  await this.respond(body);
-                }
-              } catch (error) {
-                console.warn('[dsh-im] approval frame handling failed:', error.message);
-              } finally {
-                onPendingChange?.(false);
-              }
-              return;
-            }
-            if (frame?.type === 'question/requested') {
-              if (!onQuestion) return;
-              if (seenQuestions.has(envelope.rpcId)) return;
-              seenQuestions.add(envelope.rpcId);
-              try {
-                onPendingChange?.(true);
-                const result = await onQuestion({
-                  rpcId: envelope.rpcId,
-                  sessionId,
-                  questions: frame.questions,
-                  signal,
-                });
-                if (result?.cancelled) {
-                  await this.respond({
-                    type: 'client-response',
-                    rpcId: envelope.rpcId,
-                    result: { ok: false, error: { code: 'cancelled' } },
-                  });
-                } else if (result?.answers) {
-                  await this.respond({
-                    type: 'client-response',
-                    rpcId: envelope.rpcId,
-                    result: { ok: true, value: { sessionId, answer: result } },
-                  });
-                }
-              } catch (error) {
-                console.warn('[dsh-im] question frame handling failed:', error.message);
-              } finally {
-                onPendingChange?.(false);
-              }
-              return;
-            }
-          });
-        });
+        socket = this.#createWebSocket(url.toString());
       } catch (error) {
-        lastError = error;
-      } finally {
-        signal?.removeEventListener('abort', onAbort);
+        reject(error);
+        return;
+      }
+      let opened = false;
+      let settled = false;
+      let callbackFailure = null;
+      let callbackTail = Promise.resolve();
+      let ownershipReady = ownership === undefined || ownership === null;
+      const bufferedEnvelopes = [];
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        socket.removeEventListener('open', handleOpen);
+        socket.removeEventListener('message', handleMessage);
+        socket.removeEventListener('close', handleClose);
+        socket.removeEventListener('error', handleError);
+        signal.removeEventListener('abort', handleAbort);
+        if (ownership?.reconnect === close) ownership.reconnect = null;
+        void callbackTail.then(() => {
+          const failure = error ?? callbackFailure;
+          if (failure) reject(failure);
+          else resolve();
+        }, reject);
+      };
+      const close = () => {
         try {
-          socket.close();
-        } catch {}
-      }
-      if (signal?.aborted) break;
-      if (opened && Date.now() - liveStart >= 5_000) {
-        failures = 0;
-      } else {
-        failures += 1;
-        if (failures >= 3) {
-          throw lastError ?? new Error('Harness approval stream failed after repeated disconnects');
+          if (socket.readyState === 0 || socket.readyState === 1) socket.close();
+        } catch {
+          // Cleanup must still settle the watcher if a WebSocket rejects close while connecting.
         }
-      }
-      await sleep(Math.min(500 * failures, 3_000), signal);
-    }
+      };
+      const handleOpen = () => {
+        opened = true;
+        if (ownership) ownership.reconnect = close;
+        try {
+          onOpen?.();
+        } catch (error) {
+          console.warn(`[${this.#logPrefix}] ignored an interaction open callback failure:`, error.message);
+        }
+        if (ownership) {
+          void this.#refreshInteractionOwnerships(sessionId, signal).then(() => {
+            if (settled) return;
+            ownershipReady = true;
+            for (const envelope of bufferedEnvelopes.splice(0)) processEnvelope(envelope);
+          }).catch((error) => {
+            callbackFailure ??= error;
+            close();
+            finish(error);
+          });
+        }
+      };
+      const dispatch = (callback, value) => {
+        if (!callback) return;
+        callbackTail = callbackTail
+          .then(() => callback(value))
+          .catch((error) => {
+            callbackFailure ??= error;
+            close();
+            finish(callbackFailure);
+          });
+      };
+      const processEnvelope = (envelope) => {
+        const payload = envelope.payload;
+        if (ownership && payload.type === 'session/event') {
+          this.#consumeInteractionOwnerships(sessionId, [payload.event]);
+          return;
+        }
+        if (payload.type === 'question/requested' || payload.type === 'approval/requested') {
+          const kind = payload.type === 'question/requested' ? 'question' : 'approval';
+          const interactionId = kind === 'question' ? envelope.rpcId : payload.approvalId;
+          const claimKey = `${kind}:${interactionId}`;
+          if (ownership) {
+            const claim = this.#interactionOwner(sessionId, claimKey, kind);
+            if (claim?.ownership !== ownership) return;
+            this.#interactionClaims.set(claimKey, claim);
+          }
+          const toolCall = kind === 'approval' && ownership && typeof payload.callId === 'string'
+            ? this.#interactionClaims.get(claimKey)?.ownership.toolCalls.get(payload.callId)
+            : undefined;
+          dispatch(onInteraction, Object.freeze({
+            kind,
+            interactionId,
+            rpcId: envelope.rpcId,
+            sessionId,
+            payload,
+            recovered: ownership
+              ? this.#interactionClaims.get(claimKey)?.recovered === true
+              : false,
+            ...(toolCall ? { toolCall } : {}),
+            reconnect: close,
+            respond: (result, options = {}) => this.respondInteraction(
+              envelope.rpcId,
+              result,
+              { ...options, signal: options.signal ?? signal },
+            ),
+          }));
+          return;
+        }
+        if (payload.type === 'question/resolved' || payload.type === 'approval/resolved') {
+          const kind = payload.type === 'question/resolved' ? 'question' : 'approval';
+          const interactionId = kind === 'question'
+            ? payload.questionRpcId
+            : payload.approvalId;
+          const claimKey = `${kind}:${interactionId}`;
+          if (ownership) {
+            const claim = this.#interactionClaims.get(claimKey);
+            if (claim?.ownership !== ownership) return;
+            this.#interactionClaims.delete(claimKey);
+          }
+          dispatch(onResolved, Object.freeze({
+            kind,
+            interactionId,
+            sessionId,
+            outcome: payload.outcome,
+            payload,
+          }));
+        }
+      };
+      const handleMessage = (event) => {
+        try {
+          if (typeof event.data !== 'string') throw new Error('binary WebSocket frame');
+          const envelope = JSON.parse(event.data);
+          const payload = envelope?.payload;
+          if (envelope?.type !== 'server-request'
+            || typeof envelope.rpcId !== 'string'
+            || !payload || typeof payload !== 'object'
+            || envelope.method !== payload.type) {
+            throw new Error('invalid server-request envelope');
+          }
+          if (payload.sessionId !== sessionId) return;
+          if (!ownershipReady) bufferedEnvelopes.push(envelope);
+          else processEnvelope(envelope);
+        } catch (error) {
+          console.warn(`[${this.#logPrefix}] ignored a malformed Harness interaction frame:`, error.message);
+        }
+      };
+      const handleClose = () => finish(opened ? null : new Error(
+        'Harness interaction WebSocket closed before opening',
+      ));
+      const handleError = () => {
+        finish(new Error(opened
+          ? 'Harness interaction WebSocket failed'
+          : 'Harness interaction WebSocket failed before opening'));
+        close();
+      };
+      const handleAbort = () => {
+        close();
+        finish();
+      };
+
+      socket.addEventListener('open', handleOpen);
+      socket.addEventListener('message', handleMessage);
+      socket.addEventListener('close', handleClose, { once: true });
+      socket.addEventListener('error', handleError, { once: true });
+      signal.addEventListener('abort', handleAbort, { once: true });
+      if (signal.aborted) handleAbort();
+    });
   }
 
   stopManagedProcess() {

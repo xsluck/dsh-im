@@ -1,7 +1,11 @@
-import { HarnessClient as SharedHarnessClient } from '../shared/harness-client.mjs';
+import { HarnessClient } from '../shared/harness-client.mjs';
 
-export class WhatsappHarnessClient extends SharedHarnessClient {
+export class WhatsappHarnessClient extends HarnessClient {
   constructor(options) {
-    super({ ...options, rpcPrefix: options.rpcPrefix ?? 'whatsapp' });
+    super({
+      ...options,
+      rpcIdPrefix: 'whatsapp',
+      logPrefix: 'dsh-whatsapp',
+    });
   }
 }

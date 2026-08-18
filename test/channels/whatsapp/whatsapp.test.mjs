@@ -25,13 +25,6 @@ import {
 const ACCOUNT_JID = '16505550123@s.whatsapp.net';
 const AUTH_DIRECTORY = '7fe8c17e-4fb7-4c5b-a9dc-c36525575dd1';
 
-async function until(predicate, timeoutMs = 1_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate() && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
-
 function linkedConfig(overrides = {}) {
   return {
     botId: deriveWhatsappBotId(ACCOUNT_JID),
@@ -257,7 +250,6 @@ test('WhatsApp runtime connects a linked device and replies through Harness', as
     message: { conversation: 'hello' },
   });
   assert.equal(runtime.status.ready, true);
-  await until(() => calls.some((call) => call[0] === 'message' && call[2].text === 'Harness answer'));
   assert.ok(calls.some((call) => call[0] === 'presence' && call[1] === 'composing'));
   assert.ok(calls.some((call) => call[0] === 'message' && call[2].text === 'Harness answer'));
   await runtime.stop();
@@ -304,12 +296,10 @@ test('WhatsApp runtime answers self-chat without processing its own reply echo',
     key: { remoteJid: ACCOUNT_JID, id: 'owner-message-1', fromMe: true },
     message: { conversation: 'hello from message yourself' },
   });
-  await until(() => sent.length === 1);
   await callbacks.onMessage({
     key: { remoteJid: ACCOUNT_JID, id: 'bot-reply-1', fromMe: true },
     message: { conversation: 'Harness self-chat answer' },
   });
-  await until(() => askCount === 1);
   assert.equal(askCount, 1);
   assert.deepEqual(sent, [[ACCOUNT_JID, { text: 'Harness self-chat answer' }]]);
   await runtime.stop();
