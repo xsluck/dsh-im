@@ -248,7 +248,7 @@ export class TelegramRuntime {
           botId: this.#config.platformId,
           username: this.#config.username,
         });
-        if (message) await this.#bridge.accept(message);
+        if (message) void this.#bridge.accept(message);
         cursor = update.update_id + 1;
         await this.#state.setCursor(cursor);
       }

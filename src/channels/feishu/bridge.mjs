@@ -7,6 +7,8 @@ import {
 } from './message-utils.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
+import { ApprovalGate, detectMessageLanguage } from '../shared/approval-gate.mjs';
+import { QuestionGate } from '../shared/question-gate.mjs';
 
 const HELP_TEXT = [
   '北汇星河 AIOS 已连接 DeepSeek Harness。',
@@ -28,6 +30,8 @@ export class FeishuHarnessBridge {
   #state;
   #queues = new Map();
   #acceptedMessageIds = new Set();
+  #approvals = new ApprovalGate();
+  #questions = new QuestionGate();
   #status;
   #allowedSenderOpenIds;
   #replyTimeoutMs;
@@ -59,11 +63,27 @@ export class FeishuHarnessBridge {
       console.warn('[bridge] ignored a message from a sender outside the allowlist');
       return;
     }
+    const key = conversationKey(event);
+    if (this.#approvals.tryResolve({
+      key,
+      text: extractText(event),
+      messageId,
+      markSeen: (id) => this.#state.markSeen(id),
+    })) {
+      return;
+    }
+    if (this.#questions.tryResolve({
+      key,
+      text: extractText(event),
+      messageId,
+      markSeen: (id) => this.#state.markSeen(id),
+    })) {
+      return;
+    }
     if (this.#state.hasSeen(messageId) || this.#acceptedMessageIds.has(messageId)) return;
     this.#acceptedMessageIds.add(messageId);
     const processingReaction = this.#addReaction(messageId, 'OnIt');
 
-    const key = conversationKey(event);
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const task = previous
       .catch(() => undefined)
@@ -80,6 +100,8 @@ export class FeishuHarnessBridge {
       })
       .finally(() => {
         this.#acceptedMessageIds.delete(messageId);
+        this.#approvals.cancelFor(key);
+        this.#questions.cancelFor(key);
         if (this.#queues.get(key) === task) this.#queues.delete(key);
       });
     this.#queues.set(key, task);
@@ -130,13 +152,30 @@ export class FeishuHarnessBridge {
   async #answerWithStream(event, key, text) {
     const chatId = event.message.chat_id;
     const messageId = event.message.message_id;
+    const approvalHook = (approval) => this.#approvals.request({
+      key,
+      approval,
+      language: detectMessageLanguage(text),
+      sendPrompt: (prompt) => this.#send(chatId, prompt),
+    });
+    const questionHook = ({ questions, signal }) => this.#questions.request({
+      key,
+      questions,
+      language: detectMessageLanguage(text),
+      signal,
+      sendPrompt: (prompt) => this.#send(chatId, prompt),
+    });
     if (!this.#channel?.stream) {
       const { answer } = await askInWorkspaceSession({
         harness: this.#harness,
         state: this.#state,
         key,
         text,
-        askOptions: { timeoutMs: this.#replyTimeoutMs },
+        askOptions: {
+          timeoutMs: this.#replyTimeoutMs,
+          onApproval: approvalHook,
+          onQuestion: questionHook,
+        },
       });
       for (const chunk of splitText(answer)) await this.#send(chatId, chunk);
       this.#status.streamFallbacks = (this.#status.streamFallbacks ?? 0) + 1;
@@ -156,6 +195,8 @@ export class FeishuHarnessBridge {
             text,
             askOptions: {
               timeoutMs: this.#replyTimeoutMs,
+              onApproval: approvalHook,
+              onQuestion: questionHook,
               onUpdate: async (update) => {
                 await controller.setContent(this.#progressText(update));
                 this.#status.streamUpdates = (this.#status.streamUpdates ?? 0) + 1;
@@ -182,7 +223,11 @@ export class FeishuHarnessBridge {
         state: this.#state,
         key,
         text,
-        askOptions: { timeoutMs: this.#replyTimeoutMs },
+        askOptions: {
+          timeoutMs: this.#replyTimeoutMs,
+          onApproval: approvalHook,
+          onQuestion: questionHook,
+        },
       });
       for (const chunk of splitText(answer)) await this.#send(chatId, chunk);
       this.#status.streamFallbacks = (this.#status.streamFallbacks ?? 0) + 1;

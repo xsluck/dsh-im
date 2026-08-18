@@ -5,6 +5,8 @@ import {
 import { createDingTalkCardStream } from './dingtalk-card-stream.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
+import { ApprovalGate, detectMessageLanguage } from '../shared/approval-gate.mjs';
+import { QuestionGate } from '../shared/question-gate.mjs';
 
 const CARD_INITIAL_TEXT = '已连接 DeepSeek Harness，正在思考…';
 const CARD_ERROR_TEXT = '消息处理失败，请稍后重试。';
@@ -103,6 +105,8 @@ export class DingtalkHarnessBridge {
   #signal;
   #queues = new Map();
   #acceptedMessageIds = new Set();
+  #approvals = new ApprovalGate();
+  #questions = new QuestionGate();
 
   constructor({
     api,
@@ -157,12 +161,33 @@ export class DingtalkHarnessBridge {
       this.#status.lastRejectedAt = new Date().toISOString();
       return Promise.resolve();
     }
+    const replyText = message?.msgtype === 'text' ? nonEmptyString(message?.text?.content) : '';
+    if (this.#approvals.tryResolve({
+      key,
+      text: replyText,
+      messageId,
+      markSeen: (id) => this.#state.markSeen(id),
+    })) {
+      this.#acceptedMessageIds.delete(messageId);
+      return Promise.resolve();
+    }
+    if (this.#questions.tryResolve({
+      key,
+      text: replyText,
+      messageId,
+      markSeen: (id) => this.#state.markSeen(id),
+    })) {
+      this.#acceptedMessageIds.delete(messageId);
+      return Promise.resolve();
+    }
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
       .then(() => this.#process(message, messageId, sender, key))
       .finally(() => {
         this.#acceptedMessageIds.delete(messageId);
+        this.#approvals.cancelFor(key);
+        this.#questions.cancelFor(key);
         if (this.#queues.get(key) === current) this.#queues.delete(key);
       });
     this.#queues.set(key, current);
@@ -250,6 +275,19 @@ export class DingtalkHarnessBridge {
         askOptions: {
           timeoutMs: this.#replyTimeoutMs,
           signal: this.#signal,
+          onApproval: (approval) => this.#approvals.request({
+            key,
+            approval,
+            language: detectMessageLanguage(text),
+            sendPrompt: (prompt) => this.#send(sessionWebhook, prompt),
+          }),
+          onQuestion: ({ questions, signal }) => this.#questions.request({
+            key,
+            questions,
+            language: detectMessageLanguage(text),
+            signal,
+            sendPrompt: (prompt) => this.#send(sessionWebhook, prompt),
+          }),
           onUpdate: cardStarted
             ? (update) => cardStream.push(progressText(update))
             : undefined,

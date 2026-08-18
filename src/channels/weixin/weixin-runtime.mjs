@@ -156,7 +156,7 @@ export class WeixinRuntime {
         this.#status.lastError = null;
 
         for (const message of response?.msgs ?? []) {
-          await this.#bridge.accept(message);
+          void this.#bridge.accept(message);
         }
         if (typeof response?.get_updates_buf === 'string' && response.get_updates_buf) {
           await this.#state.setGetUpdatesBuf(response.get_updates_buf);

@@ -269,3 +269,54 @@ test('commands stay local and unsafe session webhooks are rejected before Harnes
   assert.equal(sent.length, 1);
   assert.equal(bridge.status.lastError, '钉钉消息没有安全的回复地址。');
 });
+
+test('bridge relays Harness approval to the chat and accepts the user reply', async () => {
+  const fixture = stateFixture();
+  const calls = { create: [], update: [], finish: [], text: [] };
+  const seen = new Set();
+  let askCount = 0;
+  const bridge = new DingtalkHarnessBridge({
+    api: {
+      sendText: async (request) => calls.text.push(request),
+      createAiCard: async (request) => {
+        calls.create.push(request);
+        return { cardInstanceId: 'card-approval' };
+      },
+      updateAiCard: async (request) => calls.update.push(request),
+      finishAiCard: async (request) => {
+        calls.finish.push(request);
+        return { delivered: true, completed: false };
+      },
+    },
+    clientId: 'ding-client',
+    clientSecret: 'host-secret',
+    harness: {
+      sessionExists: async () => true,
+      createSession: async () => 'session-approval',
+      ask: async (_sessionId, _text, options = {}) => {
+        askCount += 1;
+        await options.onApproval?.({ reason: 'This control can send a message.' });
+        return '已发送';
+      },
+    },
+    state: {
+      hasSeen: (id) => seen.has(id),
+      markSeen: async (id) => seen.add(id),
+      sessionFor: () => 'session-approval',
+      setSession: async () => {},
+      clearSession: async () => {},
+    },
+    logger: { error() {} },
+  });
+
+  const first = bridge.accept(message('approval-start', '请发送'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(calls.text.some((request) => request.text.includes('需要你审批')), true);
+
+  await bridge.accept(message('approval-reply', '同意'));
+  await first;
+
+  assert.equal(askCount, 1);
+  assert.equal(seen.has('approval-reply'), true);
+  assert.equal(calls.finish.at(-1).text, '已发送');
+});

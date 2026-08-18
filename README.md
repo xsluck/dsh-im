@@ -29,6 +29,8 @@ Connect IM bots to DeepSeek Harness by scanning a QR code, using an App Manifest
 - Discord：使用 Developer Portal 生成的 Bot Token 接入机器人，通过 Gateway v10 长连接收消息；私信直接回复，服务器频道仅在机器人被提及时响应，并通过编辑消息流式显示 Harness 回答。
 - WhatsApp：使用手机 WhatsApp 扫码关联设备，通过 WhatsApp Web 长连接收消息；收到消息后显示已读和“正在输入”，再发送 Harness 的最终回答。
 
+所有渠道都支持 Harness 审批：当 Harness 需要审批时，机器人会把审批提示直接发给会话里的用户，用户回复“同意”“批准”“yes”等即可继续，回复“拒绝”“no”等则终止该次工具调用；审批提示会跟随用户消息的语言显示中文或英文。
+
 其他 IM 平台可继续按同一渠道适配器结构接入。
 
 ## 安装
@@ -142,6 +144,8 @@ Connect IM bots to DeepSeek Harness by scanning a QR code, using an App Manifest
 - Telegram: bind a BotFather-created bot with its Bot Token, receive messages through Bot API long polling, reply directly in private chats, require a mention or reply in groups, and stream Harness output by editing the reply.
 - Discord: bind a Developer Portal bot with its Bot Token, receive events through Gateway v10, reply directly in DMs, require a mention in server channels, and stream Harness output by editing the reply.
 - WhatsApp: scan a QR code to link a WhatsApp device, receive messages over WhatsApp Web, show a native read receipt and typing indicator, and then send the final Harness answer.
+
+Every channel supports Harness approvals: when Harness needs an approval, the bot sends the approval prompt directly to the conversation, and the user can answer “同意”, “批准”, “yes”, etc. to continue, or “拒绝”, “no”, etc. to decline the tool call. The prompt follows the language of the user's message (Chinese or English).
 
 Other IM platforms can be added through the same channel-adapter structure.
 

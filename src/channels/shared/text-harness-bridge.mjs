@@ -1,5 +1,7 @@
 import { runWorkspaceCommand } from './workspace-command.mjs';
 import { askInWorkspaceSession } from './workspace-session.mjs';
+import { ApprovalGate, detectMessageLanguage } from './approval-gate.mjs';
+import { QuestionGate } from './question-gate.mjs';
 
 function cleanText(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -26,6 +28,8 @@ export class TextHarnessBridge {
   #logger;
   #replyTimeoutMs;
   #queues = new Map();
+  #approvals = new ApprovalGate();
+  #questions = new QuestionGate();
 
   constructor({
     descriptor,
@@ -56,6 +60,22 @@ export class TextHarnessBridge {
     const conversationId = cleanText(message?.conversationId);
     const kind = message?.kind === 'group' ? 'group' : 'direct';
     const key = `${kind}:${conversationId}`;
+    if (this.#approvals.tryResolve({
+      key,
+      text: cleanText(message?.content),
+      messageId: cleanText(message?.messageId),
+      markSeen: (id) => this.#state.markSeen(id),
+    })) {
+      return Promise.resolve();
+    }
+    if (this.#questions.tryResolve({
+      key,
+      text: cleanText(message?.content),
+      messageId: cleanText(message?.messageId),
+      markSeen: (id) => this.#state.markSeen(id),
+    })) {
+      return Promise.resolve();
+    }
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
@@ -87,6 +107,7 @@ export class TextHarnessBridge {
 
     const target = message.replyTarget;
     const text = cleanText(message.content);
+    const conversationKey = `${message.kind}:${message.conversationId}`;
     try {
       if (!text) {
         await this.#bot.sendText(target, '目前仅支持文字消息。');
@@ -116,7 +137,6 @@ export class TextHarnessBridge {
         await this.#state.markSeen(messageId);
         return;
       }
-      const conversationKey = `${message.kind}:${message.conversationId}`;
       const workspaceCommand = await runWorkspaceCommand(text, this.#harness, conversationKey);
       if (workspaceCommand) {
         for (const reply of workspaceCommand.messages ?? [workspaceCommand.message]) {
@@ -154,6 +174,19 @@ export class TextHarnessBridge {
         text,
         askOptions: {
           timeoutMs: this.#replyTimeoutMs,
+          onApproval: (approval) => this.#approvals.request({
+            key: conversationKey,
+            approval,
+            language: detectMessageLanguage(text),
+            sendPrompt: (prompt) => this.#bot.sendText(target, prompt),
+          }),
+          onQuestion: ({ questions, signal }) => this.#questions.request({
+            key: conversationKey,
+            questions,
+            language: detectMessageLanguage(text),
+            signal,
+            sendPrompt: (prompt) => this.#bot.sendText(target, prompt),
+          }),
           onUpdate: stream ? async (update) => {
             const progress = update.type === 'text' ? update.text
               : update.type === 'tool' ? `正在使用${update.name}…` : update.text;
@@ -190,6 +223,9 @@ export class TextHarnessBridge {
           sendError,
         );
       }
+    } finally {
+      this.#approvals.cancelFor(conversationKey);
+      this.#questions.cancelFor(conversationKey);
     }
   }
 }

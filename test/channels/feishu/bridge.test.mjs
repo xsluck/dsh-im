@@ -238,3 +238,56 @@ test('bridge does not expose internal error details in a Feishu failure reply', 
   assert.doesNotMatch(sent[0], /secret-shaped-internal-detail|private\/path/);
   assert.equal(status.lastError, 'secret-shaped-internal-detail /private/path');
 });
+
+test('bridge relays Harness approval to the chat and accepts the user reply', async () => {
+  const sent = [];
+  const streamed = [];
+  const seen = new Set();
+  const status = { messagesReceived: 0, messagesReplied: 0, messagesRejected: 0 };
+  let askCount = 0;
+  const bridge = new FeishuHarnessBridge({
+    client: {
+      im: { v1: { message: { create: async (request) => {
+        sent.push(JSON.parse(request.data.content).text);
+        return { code: 0 };
+      } } } },
+    },
+    channel: {
+      addReaction: async (_messageId, emojiType) => `reaction-${emojiType}`,
+      removeReaction: async () => undefined,
+      stream: async (_chatId, input) => {
+        const updates = [];
+        await input.markdown({ setContent: async (content) => updates.push(content) });
+        streamed.push(updates);
+        return { messageId: 'om_reply' };
+      },
+    },
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_sessionId, _text, options = {}) => {
+        askCount += 1;
+        await options.onApproval?.({ reason: 'This control can send a message.' });
+        return '已发送';
+      },
+    },
+    state: {
+      hasSeen: (id) => seen.has(id),
+      markSeen: async (id) => seen.add(id),
+      sessionFor: () => 'session-existing',
+    },
+    status,
+    allowedSenderOpenIds: new Set(['ou_user']),
+  });
+
+  const first = bridge.accept(event('om_approval', '请发送'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(sent.some((text) => text.includes('需要你审批')), true);
+
+  bridge.accept(event('om_approval_reply', '同意'));
+  await first;
+  await bridge.waitForIdle();
+
+  assert.equal(askCount, 1);
+  assert.equal(seen.has('om_approval_reply'), true);
+  assert.equal(streamed.at(-1).includes('已发送'), true);
+});

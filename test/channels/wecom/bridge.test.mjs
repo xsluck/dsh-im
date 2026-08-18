@@ -83,6 +83,42 @@ test('Enterprise WeChat visibility scope accepts direct and group conversations 
   assert.equal(asks, 2);
 });
 
+test('Enterprise WeChat relays Harness approval to the chat and accepts the user reply', async () => {
+  const replies = [];
+  const store = state();
+  let askCount = 0;
+  const bridge = new WecomHarnessBridge({
+    client: {
+      replyStream: async (_frame, streamId, content, finish) => replies.push({ streamId, content, finish }),
+      replyStreamNonBlocking: async () => {},
+      sendMessage: async () => {},
+    },
+    generateStreamId: () => 'stream-approval',
+    harness: {
+      sessionExists: async () => true,
+      ensureRunning: async () => true,
+      ask: async (_session, _text, options = {}) => {
+        askCount += 1;
+        await options.onApproval?.({ reason: 'This control can send a message.' });
+        return '已发送';
+      },
+    },
+    state: store,
+    logger: { error() {} },
+  });
+
+  const first = bridge.accept(frame());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(replies.some((reply) => reply.content.includes('需要你审批')), true);
+
+  await bridge.accept(frame({ msgid: 'msg-2', text: { content: '同意' } }));
+  await first;
+
+  assert.equal(askCount, 1);
+  assert.equal(store.seen.has('msg-2'), true);
+  assert.equal(replies.at(-1).content, '已发送');
+});
+
 test('Enterprise WeChat finalizes an existing progress stream when Harness fails', async () => {
   const replies = [];
   const store = state();

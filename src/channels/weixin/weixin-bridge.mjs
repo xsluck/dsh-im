@@ -5,6 +5,8 @@ import {
 } from './weixin-api.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
+import { ApprovalGate, detectMessageLanguage } from '../shared/approval-gate.mjs';
+import { QuestionGate } from '../shared/question-gate.mjs';
 
 const HELP_TEXT = [
   '微信已连接 DeepSeek Harness。',
@@ -47,6 +49,8 @@ export class WeixinHarnessBridge {
   #replyTimeoutMs;
   #maxMessageChars;
   #queues = new Map();
+  #approvals = new ApprovalGate();
+  #questions = new QuestionGate();
 
   constructor({
     api,
@@ -81,6 +85,21 @@ export class WeixinHarnessBridge {
 
   accept(message) {
     const sender = typeof message?.from_user_id === 'string' ? message.from_user_id : '';
+    const text = extractWeixinText(message);
+    const consumed = this.#approvals.tryResolve({
+      key: sender,
+      text,
+      messageId: weixinMessageId(message),
+      markSeen: (id) => this.#state.markSeen(id),
+    }) || this.#questions.tryResolve({
+      key: sender,
+      text,
+      messageId: weixinMessageId(message),
+      markSeen: (id) => this.#state.markSeen(id),
+    });
+    if (consumed) {
+      return Promise.resolve();
+    }
     const previous = this.#queues.get(sender) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
@@ -114,6 +133,7 @@ export class WeixinHarnessBridge {
     const contextToken = typeof message.context_token === 'string' ? message.context_token : undefined;
     const runId = typeof message.run_id === 'string' ? message.run_id : undefined;
     const text = extractWeixinText(message);
+    let progressTimer = null;
     try {
       if (!text) {
         await this.#send(sender, '目前仅支持文字消息，以及微信已转成文字的语音消息。', contextToken, runId);
@@ -149,14 +169,67 @@ export class WeixinHarnessBridge {
         return;
       }
 
+      let pendingProgress = '';
+      let approvalRequested = false;
+      let progressMessages = 0;
+      let lastSentProgress = '';
+      const sendProgress = async (progress, { isFinal = false } = {}) => {
+        if (!progress || progress === lastSentProgress) return;
+        if (!isFinal && (approvalRequested || progressMessages >= 20)) return;
+        lastSentProgress = progress;
+        progressMessages += 1;
+        try {
+          await this.#send(sender, progress, contextToken, runId);
+        } catch (error) {
+          this.#logger.warn?.('[dsh-weixin] failed to send progress:', error);
+        }
+      };
+      const progressTimerRef = setInterval(() => {
+        sendProgress(pendingProgress);
+      }, 60_000);
+      progressTimer = progressTimerRef;
       const { answer } = await askInWorkspaceSession({
         harness: this.#harness,
         state: this.#state,
         key,
         text,
-        askOptions: { timeoutMs: this.#replyTimeoutMs },
+        askOptions: {
+          timeoutMs: this.#replyTimeoutMs,
+          onUpdate: async (update) => {
+            if (approvalRequested) return;
+            if (update.type === 'tool') {
+              await sendProgress(`正在使用${update.name}…`);
+              return;
+            }
+            if (update.type !== 'text' || !update.text) return;
+            if (update.source === 'message') {
+              await sendProgress(update.text);
+            } else {
+              pendingProgress = update.text;
+            }
+          },
+          onApproval: async (approval) => {
+            approvalRequested = true;
+            clearInterval(progressTimer);
+            await sendProgress(pendingProgress);
+            return this.#approvals.request({
+              key: sender,
+              approval,
+              language: detectMessageLanguage(text),
+              sendPrompt: (prompt) => this.#send(sender, prompt, contextToken, runId),
+            });
+          },
+          onQuestion: ({ questions, signal }) => this.#questions.request({
+            key: sender,
+            questions,
+            language: detectMessageLanguage(text),
+            signal,
+            sendPrompt: (prompt) => this.#send(sender, prompt, contextToken, runId),
+          }),
+        },
       });
-      await this.#send(sender, answer, contextToken, runId);
+      clearInterval(progressTimer);
+      await sendProgress(answer, { isFinal: true });
       await this.#state.markSeen(messageId);
       this.#status.messagesReplied += 1;
       this.#status.lastReplyAt = new Date().toISOString();
@@ -170,6 +243,10 @@ export class WeixinHarnessBridge {
       } catch (sendError) {
         this.#logger.error?.('[dsh-weixin] failed to send the safe error reply:', sendError);
       }
+    } finally {
+      if (progressTimer) clearInterval(progressTimer);
+      this.#approvals.cancelFor(sender);
+      this.#questions.cancelFor(sender);
     }
   }
 

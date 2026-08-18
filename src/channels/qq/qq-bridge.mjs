@@ -1,5 +1,7 @@
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
+import { ApprovalGate, detectMessageLanguage } from '../shared/approval-gate.mjs';
+import { QuestionGate } from '../shared/question-gate.mjs';
 
 const HELP_TEXT = [
   'QQ 机器人已连接 DeepSeek Harness。',
@@ -43,6 +45,8 @@ export class QqHarnessBridge {
   #logger;
   #replyTimeoutMs;
   #queues = new Map();
+  #approvals = new ApprovalGate();
+  #questions = new QuestionGate();
 
   constructor({
     bot,
@@ -71,6 +75,22 @@ export class QqHarnessBridge {
 
   accept(message) {
     const key = conversationKey(message);
+    if (this.#approvals.tryResolve({
+      key,
+      text: safeText(message),
+      messageId: typeof message?.messageId === 'string' ? message.messageId : '',
+      markSeen: (id) => this.#state.markSeen(id),
+    })) {
+      return Promise.resolve();
+    }
+    if (this.#questions.tryResolve({
+      key,
+      text: safeText(message),
+      messageId: typeof message?.messageId === 'string' ? message.messageId : '',
+      markSeen: (id) => this.#state.markSeen(id),
+    })) {
+      return Promise.resolve();
+    }
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
@@ -103,6 +123,7 @@ export class QqHarnessBridge {
 
     const target = message.replyTarget;
     const text = safeText(message);
+    const key = conversationKey(message);
     try {
       if (!text) {
         await this.#bot.sendText(target, '目前仅支持文字消息。');
@@ -121,7 +142,6 @@ export class QqHarnessBridge {
         await this.#state.markSeen(messageId);
         return;
       }
-      const key = conversationKey(message);
       if (command === '/new') {
         await this.#state.clearSession(key);
         await this.#bot.sendText(target, '已开启新会话。请发送你的问题。');
@@ -153,6 +173,19 @@ export class QqHarnessBridge {
         text,
         askOptions: {
           timeoutMs: this.#replyTimeoutMs,
+          onApproval: (approval) => this.#approvals.request({
+            key,
+            approval,
+            language: detectMessageLanguage(text),
+            sendPrompt: (prompt) => this.#bot.sendText(target, prompt),
+          }),
+          onQuestion: ({ questions, signal }) => this.#questions.request({
+            key,
+            questions,
+            language: detectMessageLanguage(text),
+            signal,
+            sendPrompt: (prompt) => this.#bot.sendText(target, prompt),
+          }),
           onUpdate: stream ? async (update) => {
             const progress = update.type === 'text'
               ? update.text
@@ -187,6 +220,9 @@ export class QqHarnessBridge {
       } catch (sendError) {
         this.#logger.error?.('[dsh-im:qq] failed to send the safe error reply:', sendError);
       }
+    } finally {
+      this.#approvals.cancelFor(key);
+      this.#questions.cancelFor(key);
     }
   }
 }

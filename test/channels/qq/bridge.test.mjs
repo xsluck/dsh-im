@@ -101,3 +101,49 @@ test('QQ credential-bound bots accept senders within the platform visibility sco
   assert.equal(asks, 1);
   assert.equal(bridge.status.messagesRejected, 0);
 });
+
+test('QQ relays Harness approval to the conversation and accepts the user reply', async () => {
+  const frames = [];
+  const sent = [];
+  const seen = new Set();
+  let askCount = 0;
+  const bridge = new QqHarnessBridge({
+    bot: {
+      sendText: async (_target, text) => sent.push(text),
+      openStream: () => ({
+        update: async (text) => frames.push(text),
+        complete: async () => frames.push('DONE'),
+        cancel() {},
+      }),
+    },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      sessionExists: async () => true,
+      ensureRunning: async () => true,
+      ask: async (_session, _text, options = {}) => {
+        askCount += 1;
+        await options.onApproval?.({ reason: 'This control can send a message.' });
+        return '已发送';
+      },
+    },
+    state: {
+      hasSeen: (id) => seen.has(id),
+      markSeen: async (id) => seen.add(id),
+      sessionFor: () => 'session-existing',
+      setSession: async () => {},
+      clearSession: async () => {},
+    },
+    logger: { error() {} },
+  });
+
+  const first = bridge.accept(message());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(sent.some((text) => text.includes('需要你审批')), true);
+
+  await bridge.accept(message({ messageId: 'msg-2', content: '同意' }));
+  await first;
+
+  assert.equal(askCount, 1);
+  assert.equal(seen.has('msg-2'), true);
+  assert.equal(frames.includes('已发送'), true);
+});

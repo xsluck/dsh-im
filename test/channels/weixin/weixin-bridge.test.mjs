@@ -111,3 +111,39 @@ test('bridge commands are local and internal failures return a generic message',
   assert.match(sent.at(-1), /消息处理失败/);
   assert.doesNotMatch(sent.at(-1), /private path|secret|token-shaped/);
 });
+
+test('bridge routes Harness approval to WeChat and accepts the user reply without queueing behind the turn', async () => {
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:owner-user', 'session-1');
+  const sent = [];
+  let askCount = 0;
+  const bridge = new WeixinHarnessBridge({
+    api: { sendText: async (request) => sent.push(request) },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    harness: {
+      sessionExists: async () => true,
+      createSession: async () => { throw new Error('should reuse the bound session'); },
+      ask: async (_sessionId, _text, options = {}) => {
+        askCount += 1;
+        await options.onApproval?.({ reason: 'This control can send a message.' });
+        return '已发送';
+      },
+    },
+    state: fixture.state,
+    logger: { error() {} },
+  });
+
+  const first = bridge.accept(message('1', '请发送'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(sent.some(({ text }) => text.includes('需要你审批')), true);
+
+  const second = bridge.accept(message('2', '同意'));
+  await second;
+  await first;
+
+  assert.equal(askCount, 1);
+  assert.equal(fixture.seen.has('2'), true);
+  assert.equal(sent.at(-1).text, '已发送');
+});

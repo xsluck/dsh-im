@@ -387,7 +387,7 @@ test('HarnessReplyTracker correlates the prompt and emits only answer text', () 
       data: { turn: 5, step: 1, chunk: { type: 'text-delta', index: 1, text: '深圳' } },
     } },
   ]);
-  assert.deepEqual(first, { type: 'text', text: '深圳' });
+  assert.deepEqual(first, { type: 'text', text: '深圳', source: 'delta' });
 
   const second = tracker.consume([
     { event: {
@@ -401,7 +401,7 @@ test('HarnessReplyTracker correlates the prompt and emits only answer text', () 
       data: { turn: 5, step: 1, chunk: { type: 'text-delta', index: 1, text: '明天有雨' } },
     } },
   ]);
-  assert.deepEqual(second, { type: 'text', text: '深圳明天有雨' });
+  assert.deepEqual(second, { type: 'text', text: '深圳明天有雨', source: 'delta' });
 
   const final = tracker.consume([
     { event: {
@@ -418,7 +418,7 @@ test('HarnessReplyTracker correlates the prompt and emits only answer text', () 
     } },
     { event: { type: 'turn/end', seq: 21, data: { turn: 5, reason: { kind: 'completed' } } } },
   ]);
-  assert.deepEqual(final, { type: 'text', text: '深圳明天有阵雨。' });
+  assert.deepEqual(final, { type: 'text', text: '深圳明天有阵雨。', source: 'message' });
   assert.equal(tracker.finished, true);
   assert.equal(tracker.answer, '深圳明天有阵雨。');
   assert.deepEqual(tracker.reason, { kind: 'completed' });

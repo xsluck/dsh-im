@@ -337,7 +337,7 @@ test('reply tracker associates only the Harness turn created by the DingTalk pro
       data: { turn: 9, step: 0, chunk: { type: 'text-delta', index: 0, text: '钉钉' } },
     } },
   ]);
-  assert.deepEqual(update, { type: 'text', text: '钉钉' });
+  assert.deepEqual(update, { type: 'text', text: '钉钉', source: 'delta' });
   tracker.consume([
     { event: {
       seq: 6,

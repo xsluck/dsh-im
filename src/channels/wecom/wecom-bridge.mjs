@@ -1,6 +1,8 @@
 import { generateReqId } from '@wecom/aibot-node-sdk';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
+import { ApprovalGate, detectMessageLanguage } from '../shared/approval-gate.mjs';
+import { QuestionGate } from '../shared/question-gate.mjs';
 
 const HELP_TEXT = [
   '企业微信机器人已连接 DeepSeek Harness。',
@@ -87,6 +89,8 @@ export class WecomHarnessBridge {
   #replyTimeoutMs;
   #generateReqId;
   #queues = new Map();
+  #approvals = new ApprovalGate();
+  #questions = new QuestionGate();
 
   constructor({
     client,
@@ -116,6 +120,22 @@ export class WecomHarnessBridge {
 
   accept(frame) {
     const key = conversationKey(frame);
+    if (this.#approvals.tryResolve({
+      key,
+      text: messageText(frame),
+      messageId: bodyOf(frame).msgid,
+      markSeen: (id) => this.#state.markSeen(id),
+    })) {
+      return Promise.resolve();
+    }
+    if (this.#questions.tryResolve({
+      key,
+      text: messageText(frame),
+      messageId: bodyOf(frame).msgid,
+      markSeen: (id) => this.#state.markSeen(id),
+    })) {
+      return Promise.resolve();
+    }
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
@@ -150,6 +170,23 @@ export class WecomHarnessBridge {
     }
   }
 
+  /**
+   * Fold an ask/approval prompt into the running answer stream bubble so the
+   * whole turn reads as one evolving bubble (WeCom cannot send stream messages
+   * through the active push, so a second reply on the same frame is unreliable).
+   */
+  async #sendPromptStream(frame, streamId, streamStarted, chatId, text) {
+    if (streamStarted && streamId) {
+      try {
+        await this.#client.replyStream(frame, streamId, text, false);
+        return;
+      } catch (error) {
+        this.#logger.warn?.('[dsh-im:wecom] stream prompt update failed; using an active reply:', error);
+      }
+    }
+    await this.#sendImmediate(frame, chatId, text);
+  }
+
   async #process(frame) {
     const body = bodyOf(frame);
     const messageId = typeof body.msgid === 'string' ? body.msgid : '';
@@ -161,6 +198,7 @@ export class WecomHarnessBridge {
     this.#status.messagesReceived += 1;
     this.#status.lastMessageAt = new Date().toISOString();
     const text = messageText(frame);
+    const key = conversationKey(frame);
     let streamId = null;
     let streamStarted = false;
     try {
@@ -181,7 +219,6 @@ export class WecomHarnessBridge {
         await this.#state.markSeen(messageId);
         return;
       }
-      const key = conversationKey(frame);
       if (command === '/new') {
         await this.#state.clearSession(key);
         await this.#sendImmediate(frame, chatId, '已开启新会话。请发送你的问题。');
@@ -205,6 +242,7 @@ export class WecomHarnessBridge {
         this.#logger.warn?.('[dsh-im:wecom] unable to start a stream; using an active reply:', error);
       }
 
+      let interactionPending = false;
       const { answer } = await askInWorkspaceSession({
         harness: this.#harness,
         state: this.#state,
@@ -212,8 +250,32 @@ export class WecomHarnessBridge {
         text,
         askOptions: {
           timeoutMs: this.#replyTimeoutMs,
+          onApproval: (approval) => {
+            interactionPending = true;
+            return this.#approvals.request({
+              key,
+              approval,
+              language: detectMessageLanguage(text),
+              sendPrompt: (prompt) => this.#sendPromptStream(frame, streamId, streamStarted, chatId, prompt),
+            }).finally(() => {
+              interactionPending = false;
+            });
+          },
+          onQuestion: ({ questions, signal }) => {
+            interactionPending = true;
+            return this.#questions.request({
+              key,
+              questions,
+              language: detectMessageLanguage(text),
+              signal,
+              sendPrompt: (prompt) => this.#sendPromptStream(frame, streamId, streamStarted, chatId, prompt),
+            }).finally(() => {
+              interactionPending = false;
+            });
+          },
           onUpdate: streamStarted && typeof this.#client.replyStreamNonBlocking === 'function'
             ? async (update) => {
+                if (interactionPending) return;
                 const progress = splitUtf8(progressText(update))[0];
                 if (progress) await this.#client.replyStreamNonBlocking(frame, streamId, progress, false);
               }
@@ -252,6 +314,9 @@ export class WecomHarnessBridge {
       } catch {
         this.#logger.error?.('[dsh-im:wecom] failed to send the safe error reply');
       }
+    } finally {
+      this.#approvals.cancelFor(key);
+      this.#questions.cancelFor(key);
     }
   }
 }

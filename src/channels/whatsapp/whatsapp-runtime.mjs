@@ -223,7 +223,7 @@ export class WhatsappRuntime {
           const message = normalizeWhatsappMessage(raw, this.#config.accountJid);
           if (!message || outboundIds.has(message.providerMessageId) || !this.#bridge) return;
           this.#status.lastCheckedAt = Date.now();
-          await this.#bridge.accept(message);
+          void this.#bridge.accept(message);
         },
         onDisconnect: ({ error }) => {
           if (controller.signal.aborted) return;

@@ -325,7 +325,7 @@ test('reply tracker associates only the Harness turn created by the Weixin promp
       data: { turn: 9, step: 0, chunk: { type: 'text-delta', index: 0, text: '微信' } },
     } },
   ]);
-  assert.deepEqual(first, { type: 'text', text: '微信' });
+  assert.deepEqual(first, { type: 'text', text: '微信', source: 'delta' });
   tracker.consume([
     { event: {
       seq: 6,
@@ -336,6 +336,74 @@ test('reply tracker associates only the Harness turn created by the Weixin promp
   ]);
   assert.equal(tracker.finished, true);
   assert.equal(tracker.answer, '微信回复完成');
+});
+
+test('reply tracker surfaces completed text blocks and tool status', () => {
+  const tracker = new HarnessReplyTracker({ promptRpcId: 'weixin-prompt', afterSeq: 2 });
+  const first = tracker.consume([
+    { event: { seq: 3, type: 'turn/start', data: { turn: 4 } } },
+    { event: {
+      seq: 4,
+      type: 'user/message',
+      data: { turn: 4, source: { rpcId: 'weixin-prompt' } },
+    } },
+    { event: {
+      seq: 5,
+      type: 'assistant/chunk',
+      data: {
+        turn: 4,
+        step: 0,
+        chunk: { type: 'block-end', index: 1, block: { type: 'text', text: '先查一下本地文件。' } },
+      },
+    } },
+  ]);
+  assert.deepEqual(first, { type: 'text', text: '先查一下本地文件。', source: 'message' });
+  const second = tracker.consume([
+    { event: { seq: 6, type: 'tool/call', data: { turn: 4, step: 0, name: 'bash' } } },
+    { event: { seq: 7, type: 'assistant/chunk', data: {
+      turn: 4,
+      step: 0,
+      chunk: { type: 'block-end', index: 2, block: { type: 'reasoning', text: 'hidden thinking' } },
+    } } },
+    { event: { seq: 8, type: 'tool/result', data: { turn: 4, step: 0 } } },
+  ]);
+  assert.deepEqual(second, { type: 'status', text: '正在整理结果…' });
+  const third = tracker.consume([
+    { event: {
+      seq: 9,
+      type: 'assistant/chunk',
+      data: { turn: 4, step: 0, chunk: { type: 'block-end', index: 3, block: { type: 'text', text: '查清楚了！' } } },
+    } },
+    { event: { seq: 10, type: 'turn/end', data: { turn: 4, reason: 'completed' } } },
+  ]);
+  assert.deepEqual(third, { type: 'text', text: '查清楚了！', source: 'message' });
+  assert.equal(tracker.finished, true);
+  assert.equal(tracker.answer, '查清楚了！');
+});
+
+test('reply tracker keeps narration text when tool events land in the same window', () => {
+  const tracker = new HarnessReplyTracker({ promptRpcId: 'weixin-prompt', afterSeq: 2 });
+  const update = tracker.consume([
+    { event: { seq: 3, type: 'turn/start', data: { turn: 4 } } },
+    { event: {
+      seq: 4,
+      type: 'user/message',
+      data: { turn: 4, source: { rpcId: 'weixin-prompt' } },
+    } },
+    { event: {
+      seq: 5,
+      type: 'assistant/chunk',
+      data: {
+        turn: 4,
+        step: 0,
+        chunk: { type: 'block-end', index: 1, block: { type: 'text', text: '先查一下本地文件。' } },
+      },
+    } },
+    { event: { seq: 6, type: 'tool/call', data: { turn: 4, step: 0, name: 'bash' } } },
+    { event: { seq: 7, type: 'tool/result', data: { turn: 4, step: 0 } } },
+  ]);
+  assert.deepEqual(update, { type: 'text', text: '先查一下本地文件。', source: 'message' });
+  assert.equal(tracker.answer, '先查一下本地文件。');
 });
 
 test('reply tracker ignores interleaved turns and older events', () => {
@@ -352,4 +420,363 @@ test('reply tracker ignores interleaved turns and older events', () => {
   ]);
   assert.equal(tracker.answer, '');
   assert.equal(tracker.finished, false);
+});
+test('HarnessClient relays an approval/requested mux WebSocket frame and responds with the user outcome', async () => {
+  const instances = [];
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+
+    constructor(url) {
+      this.url = url;
+      this.readyState = FakeWebSocket.CONNECTING;
+      this.listeners = new Map();
+      instances.push(this);
+    }
+
+    addEventListener(type, handler) {
+      if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+      this.listeners.get(type).add(handler);
+    }
+
+    emit(type, event = {}) {
+      for (const handler of [...(this.listeners.get(type) ?? [])]) handler(event);
+    }
+
+    close() {
+      this.readyState = FakeWebSocket.CLOSED;
+      this.emit('close');
+    }
+  }
+
+  const envelope = (rpcId, session, approvalId) => JSON.stringify({
+    type: 'server-request',
+    rpcId,
+    method: 'events.mux',
+    payload: {
+      type: 'approval/requested',
+      sessionId: session,
+      approvalId,
+      toolName: 'phone_act',
+      reason: 'Send message',
+    },
+  });
+
+  const client = new HarnessClient({
+    baseUrl: 'http://127.0.0.1:3080',
+    workspace: '/tmp/default-workspace',
+    webSocketImpl: FakeWebSocket,
+  });
+  client.ensureRunning = async () => {};
+  let promptRpcId = null;
+  let historyCalls = 0;
+  client.rpc = async (method, payload, _timeoutMs, options = {}) => {
+    if (method === 'session.history') {
+      historyCalls += 1;
+      if (historyCalls === 1) return { events: [] };
+      return {
+        events: [
+          { event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
+          {
+            event: {
+              seq: 2,
+              type: 'user/message',
+              data: { turn: 1, source: { rpcId: promptRpcId } },
+            },
+          },
+          {
+            event: {
+              seq: 3,
+              type: 'assistant/message',
+              data: { turn: 1, message: { content: [{ type: 'text', text: '完成' }] } },
+            },
+          },
+          { event: { seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } } },
+        ],
+      };
+    }
+    if (method === 'session.prompt') {
+      promptRpcId = options.rpcId;
+      return {};
+    }
+    throw new Error(`unexpected rpc ${method}`);
+  };
+  const responses = [];
+  client.respond = async (message) => {
+    responses.push(message);
+    return { accepted: true };
+  };
+
+  const approvals = [];
+  const pending = client.ask('session-1', '请发送', {
+    onApproval: async (approval) => {
+      approvals.push(approval);
+      return 'allowed-once';
+    },
+  });
+
+  const deadline = Date.now() + 2_000;
+  while (instances.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(instances.length, 1);
+  const socket = instances[0];
+  assert.equal(socket.url, 'ws://127.0.0.1:3080/api/events.mux');
+
+  socket.emit('open');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  socket.emit('message', { data: envelope('approval-rpc-other', 'session-other', 'approval-other') });
+  socket.emit('message', { data: envelope('approval-rpc-1', 'session-1', 'approval-1') });
+  await pending;
+
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].approvalId, 'approval-1');
+  assert.equal(approvals[0].rpcId, 'approval-rpc-1');
+  assert.deepEqual(responses, [{
+    type: 'client-response',
+    rpcId: 'approval-rpc-1',
+    result: {
+      ok: true,
+      value: {
+        sessionId: 'session-1',
+        approvalId: 'approval-1',
+        outcome: 'allowed-once',
+      },
+    },
+  }]);
+});
+
+test('HarnessClient relays a question/requested mux frame and responds with the parsed answers', async () => {
+  const instances = [];
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+
+    constructor(url) {
+      this.url = url;
+      this.readyState = FakeWebSocket.CONNECTING;
+      this.listeners = new Map();
+      instances.push(this);
+    }
+
+    addEventListener(type, handler) {
+      if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+      this.listeners.get(type).add(handler);
+    }
+
+    emit(type, event = {}) {
+      for (const handler of [...(this.listeners.get(type) ?? [])]) handler(event);
+    }
+
+    close() {
+      this.readyState = FakeWebSocket.CLOSED;
+      this.emit('close');
+    }
+  }
+
+  const envelope = (rpcId, session) => JSON.stringify({
+    type: 'server-request',
+    rpcId,
+    method: 'events.mux',
+    payload: {
+      type: 'question/requested',
+      sessionId: session,
+      questions: [
+        { id: 'mode', question: '选择运行模式', options: [{ label: '快速' }, { label: '详细' }] },
+      ],
+    },
+  });
+
+  const client = new HarnessClient({
+    baseUrl: 'http://127.0.0.1:3080',
+    workspace: '/tmp/default-workspace',
+    webSocketImpl: FakeWebSocket,
+  });
+  client.ensureRunning = async () => {};
+  let promptRpcId = null;
+  let historyCalls = 0;
+  client.rpc = async (method, payload, _timeoutMs, options = {}) => {
+    if (method === 'session.history') {
+      historyCalls += 1;
+      if (historyCalls === 1) return { events: [] };
+      return {
+        events: [
+          { event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
+          {
+            event: {
+              seq: 2,
+              type: 'user/message',
+              data: { turn: 1, source: { rpcId: promptRpcId } },
+            },
+          },
+          {
+            event: {
+              seq: 3,
+              type: 'assistant/message',
+              data: { turn: 1, message: { content: [{ type: 'text', text: '已确认' }] } },
+            },
+          },
+          { event: { seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } } },
+        ],
+      };
+    }
+    if (method === 'session.prompt') {
+      promptRpcId = options.rpcId;
+      return {};
+    }
+    throw new Error(`unexpected rpc ${method}`);
+  };
+  const responses = [];
+  client.respond = async (message) => {
+    responses.push(message);
+    return { accepted: true };
+  };
+
+  const questions = [];
+  const pending = client.ask('session-1', '请选择', {
+    onQuestion: async ({ questions: asked }) => {
+      questions.push(asked);
+      return { answers: [{ id: 'mode', selected: ['详细'] }] };
+    },
+  });
+
+  const deadline = Date.now() + 2_000;
+  while (instances.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(instances.length, 1);
+  const socket = instances[0];
+
+  socket.emit('open');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  socket.emit('message', { data: envelope('question-rpc-other', 'session-other') });
+  socket.emit('message', { data: envelope('question-rpc-1', 'session-1') });
+  await pending;
+
+  assert.equal(questions.length, 1);
+  assert.equal(questions[0][0].id, 'mode');
+  assert.deepEqual(responses, [{
+    type: 'client-response',
+    rpcId: 'question-rpc-1',
+    result: {
+      ok: true,
+      value: {
+        sessionId: 'session-1',
+        answer: { answers: [{ id: 'mode', selected: ['详细'] }] },
+      },
+    },
+  }]);
+});
+
+test('HarnessClient responds to a question with a cancelled error when the user dismisses it', async () => {
+  const instances = [];
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+
+    constructor(url) {
+      this.url = url;
+      this.readyState = FakeWebSocket.CONNECTING;
+      this.listeners = new Map();
+      instances.push(this);
+    }
+
+    addEventListener(type, handler) {
+      if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+      this.listeners.get(type).add(handler);
+    }
+
+    emit(type, event = {}) {
+      for (const handler of [...(this.listeners.get(type) ?? [])]) handler(event);
+    }
+
+    close() {
+      this.readyState = FakeWebSocket.CLOSED;
+      this.emit('close');
+    }
+  }
+
+  const client = new HarnessClient({
+    baseUrl: 'http://127.0.0.1:3080',
+    workspace: '/tmp/default-workspace',
+    webSocketImpl: FakeWebSocket,
+  });
+  client.ensureRunning = async () => {};
+  let promptRpcId = null;
+  let historyCalls = 0;
+  client.rpc = async (method, payload, _timeoutMs, options = {}) => {
+    if (method === 'session.history') {
+      historyCalls += 1;
+      if (historyCalls === 1) return { events: [] };
+      return {
+        events: [
+          { event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
+          {
+            event: {
+              seq: 2,
+              type: 'user/message',
+              data: { turn: 1, source: { rpcId: promptRpcId } },
+            },
+          },
+          {
+            event: {
+              seq: 3,
+              type: 'assistant/message',
+              data: { turn: 1, message: { content: [{ type: 'text', text: '已取消' }] } },
+            },
+          },
+          { event: { seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } } },
+        ],
+      };
+    }
+    if (method === 'session.prompt') {
+      promptRpcId = options.rpcId;
+      return {};
+    }
+    throw new Error(`unexpected rpc ${method}`);
+  };
+  const responses = [];
+  client.respond = async (message) => {
+    responses.push(message);
+    return { accepted: true };
+  };
+
+  const pending = client.ask('session-1', '请选择', {
+    onQuestion: async () => ({ cancelled: true }),
+  });
+
+  const deadline = Date.now() + 2_000;
+  while (instances.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(instances.length, 1);
+  const socket = instances[0];
+
+  socket.emit('open');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  socket.emit('message', {
+    data: JSON.stringify({
+      type: 'server-request',
+      rpcId: 'question-rpc-2',
+      method: 'events.mux',
+      payload: {
+        type: 'question/requested',
+        sessionId: 'session-1',
+        questions: [{ id: 'confirm', question: '确认继续？' }],
+      },
+    }),
+  });
+  await pending;
+
+  assert.deepEqual(responses, [{
+    type: 'client-response',
+    rpcId: 'question-rpc-2',
+    result: { ok: false, error: { code: 'cancelled' } },
+  }]);
 });
