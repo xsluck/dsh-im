@@ -60,3 +60,36 @@ test('state store retains sessions, deduplication, and the getUpdates cursor', a
   assert.equal(restored.getUpdatesBuf(), 'cursor-2');
   assert.equal((await stat(path)).mode & 0o777, 0o600);
 });
+
+
+test('state store persists interaction routes; clearSession keeps routes, clearSessions clears them', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-weixin-routes-'));
+  const path = join(root, 'account', 'state.json');
+  const state = await new WeixinStateStore(path).load();
+  await state.setSession('p2p:user', 'session-1');
+  await state.setRoute('p2p:user', {
+    sessionId: 'session-1',
+    actor: 'user',
+    contextToken: 'ctx',
+    runId: 'run',
+    updatedAt: 10,
+  });
+
+  const restored = await new WeixinStateStore(path).load();
+  assert.deepEqual(restored.routeFor('p2p:user'), {
+    sessionId: 'session-1',
+    actor: 'user',
+    contextToken: 'ctx',
+    runId: 'run',
+    updatedAt: 10,
+  });
+  assert.equal(restored.routeEntries().length, 1);
+
+  await restored.clearSession('p2p:user');
+  assert.equal(restored.sessionFor('p2p:user'), null);
+  assert.equal(restored.routeFor('p2p:user')?.sessionId, 'session-1', '/new should not remove forwarding routes');
+  assert.equal(restored.routeEntries().length, 1);
+
+  await restored.clearSessions();
+  assert.equal(restored.routeFor('p2p:user'), null, 'workspace-wide clearing should remove routes');
+});

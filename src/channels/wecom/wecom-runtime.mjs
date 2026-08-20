@@ -127,6 +127,7 @@ export class WecomRuntime {
       this.#status.lastCheckedAt = now;
       this.#status.lastConnectedAt = now;
       this.#status.lastError = null;
+      this.#bridge?.startForwarding();
       readyResolve();
     };
     const onDisconnected = () => {

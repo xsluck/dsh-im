@@ -11,6 +11,7 @@ import {
 import { HarnessApprovalQueue } from '../shared/harness-approval.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
+import { InteractionForwarder } from '../shared/interaction-forwarder.mjs';
 
 const INTERACTION_RESOLVED_TEXT = '这个问题已在其他客户端处理，无需再次回答。';
 
@@ -23,6 +24,9 @@ const HELP_TEXT = [
   '/workspacelist  列出工作区绝对路径',
   '/sessionlist [工作区序号或绝对路径]  列出会话 ID 和标题',
   '/session Session ID  将当前聊天绑定到指定会话',
+  '/watch Session ID  将指定网页会话的提问/审批转发到当前聊天（不换绑）',
+  '/watch *  默认转发所有网页会话的提问/审批到当前聊天',
+  '/unwatch  取消当前聊天的转发设置（不影响会话绑定）',
   '/status  检查连接状态',
   '/help  显示本帮助',
 ].join('\n');
@@ -71,6 +75,9 @@ export class WeixinHarnessBridge {
   #acceptedMessageIds = new Set();
   #approvalTasks = new Set();
   #approvals;
+  #forwarder;
+  #forwarderStarted = false;
+  #activeAskSessions = new Set();
 
   constructor({
     api,
@@ -100,10 +107,92 @@ export class WeixinHarnessBridge {
     this.#maxMessageChars = maxMessageChars;
     this.#signal = signal;
     this.#approvals = new HarnessApprovalQueue({ label: 'weixin', logger });
+    this.#forwarder = new InteractionForwarder({
+      harness,
+      signal,
+      logger,
+      onInteraction: (interaction, route) => {
+        if (this.#activeAskSessions.has(interaction.sessionId)) return;
+        return this.#handleInteraction(interaction, {
+          key: route.key,
+          actor: route.actor,
+          contextToken: route.contextToken,
+          runId: route.runId,
+        });
+      },
+      onResolved: (resolution) => this.#handleInteractionResolved(resolution),
+    });
   }
 
   get status() {
     return structuredClone(this.#status);
+  }
+
+  startForwarding() {
+    if (this.#forwarderStarted) return;
+    this.#forwarderStarted = true;
+    if (typeof this.#state.routeEntries !== 'function') return;
+    for (const [key, route] of this.#state.routeEntries()) {
+      this.#registerRoute({ ...route, key });
+    }
+  }
+
+  async #recordRoute({ key, actor, sessionId, contextToken, runId }) {
+    if (!key || !actor || !sessionId) return;
+    const route = {
+      sessionId,
+      actor,
+      contextToken,
+      runId,
+      updatedAt: Date.now(),
+    };
+    if (sessionId === '*') {
+      this.#forwarder.setDefaultRoute({
+        ...route,
+        key,
+        send: (text) => this.#send(actor, text, contextToken, runId),
+      });
+    } else {
+      this.#forwarder.setRoute({
+        ...route,
+        key,
+        send: (text) => this.#send(actor, text, contextToken, runId),
+      });
+    }
+    if (typeof this.#state.setRoute === 'function') {
+      try {
+        await this.#state.setRoute(key, route);
+      } catch (error) {
+        this.#logger.warn?.('[dsh-weixin] failed to persist an interaction route:', error);
+      }
+    }
+  }
+
+  #registerRoute(route) {
+    const sessionId = route?.sessionId || this.#state.sessionFor(route?.key);
+    const actor = route?.actor;
+    if (!sessionId || !actor) return;
+    if (sessionId === '*') {
+      this.#forwarder.setDefaultRoute({
+        sessionId,
+        key: route.key,
+        actor,
+        contextToken: route.contextToken,
+        runId: route.runId,
+        updatedAt: route.updatedAt,
+        send: (text) => this.#send(actor, text, route.contextToken, route.runId),
+      });
+    } else {
+      this.#forwarder.setRoute({
+        sessionId,
+        key: route.key,
+        actor,
+        contextToken: route.contextToken,
+        runId: route.runId,
+        updatedAt: route.updatedAt,
+        send: (text) => this.#send(actor, text, route.contextToken, route.runId),
+      });
+    }
   }
 
   accept(message) {
@@ -236,12 +325,63 @@ export class WeixinHarnessBridge {
       }
       if (command === '/new') {
         await this.#state.clearSession(key);
-        await this.#send(sender, '已开启新会话。请发送你的问题。', contextToken, runId);
+        await this.#send(sender, '已开启新会话。请发送你的问题。转发设置未变化；如需关闭请使用 /unwatch。', contextToken, runId);
+        await this.#state.markSeen(messageId);
+        return;
+      }
+      if (/^\/unwatch(?:\s|$)/i.test(text.trim())) {
+        this.#forwarder.removeRoute(key);
+        if (typeof this.#state.removeRoute === 'function') {
+          try {
+            await this.#state.removeRoute(key);
+          } catch (error) {
+            this.#logger.warn?.('[dsh-weixin] failed to remove a route:', error);
+          }
+        }
+        await this.#send(sender, '已关闭当前聊天的转发设置，原有会话绑定不变。', contextToken, runId);
+        await this.#state.markSeen(messageId);
+        return;
+      }
+      const watchCommand = /^\/watch(?:\s+([^\s]+))?$/i.exec(text.trim());
+      if (watchCommand) {
+        const sessionId = watchCommand[1];
+        if (!sessionId || sessionId.length > 256 || /\p{White_Space}/u.test(sessionId)) {
+          await this.#send(sender, '用法：/watch Session ID，或 /watch * 默认转发所有会话', contextToken, runId);
+          await this.#state.markSeen(messageId);
+          return;
+        }
+        try {
+          if (sessionId !== '*') {
+            if (typeof this.#harness?.sessionExists === 'function') {
+              const exists = await this.#harness.sessionExists(sessionId, { signal: this.#signal });
+              if (!exists) {
+                await this.#send(sender, '未找到该会话，请先执行 /sessionlist 确认 Session ID。', contextToken, runId);
+                await this.#state.markSeen(messageId);
+                return;
+              }
+            }
+          }
+          await this.#recordRoute({ key, actor: sender, sessionId, contextToken: undefined, runId: undefined });
+          if (sessionId === '*') {
+            await this.#send(sender, '已开启默认转发：以后所有网页会话的提问/审批都会推送到当前聊天，不影响会话绑定。', contextToken, runId);
+          } else {
+            await this.#send(sender, `已开启转发：Session ${sessionId} 的提问/审批会推送到当前聊天，不会改变当前聊天原本绑定的会话。`, contextToken, runId);
+          }
+        } catch (error) {
+          this.#logger.warn?.('[dsh-weixin] failed to watch session:', error);
+          await this.#send(sender, '暂时无法开启转发，请稍后重试。', contextToken, runId);
+        }
         await this.#state.markSeen(messageId);
         return;
       }
       const workspaceCommand = await runWorkspaceCommand(text, this.#harness, key);
       if (workspaceCommand) {
+        const sessionId = this.#state.sessionFor(key);
+        if (sessionId) {
+          await this.#recordRoute({ key, actor: sender, sessionId, contextToken, runId });
+        } else if (/^\/workspace(?:\s|$)/i.test(text.trim())) {
+          this.#forwarder.stop();
+        }
         for (const reply of workspaceCommand.messages ?? [workspaceCommand.message]) {
           await this.#send(sender, reply, contextToken, runId);
         }
@@ -249,9 +389,12 @@ export class WeixinHarnessBridge {
         return;
       }
 
+      let sessionId = null;
       let answer;
+      const sessionIdBefore = this.#state.sessionFor(key);
+      if (sessionIdBefore) this.#activeAskSessions.add(sessionIdBefore);
       try {
-        ({ answer } = await askInWorkspaceSession({
+        ({ sessionId, answer } = await askInWorkspaceSession({
           harness: this.#harness,
           state: this.#state,
           key,
@@ -270,7 +413,15 @@ export class WeixinHarnessBridge {
             onInteractionResolved: (resolution) => this.#handleInteractionResolved(resolution),
           },
         }));
+        await this.#recordRoute({
+          key,
+          actor: sender,
+          sessionId,
+          contextToken,
+          runId,
+        });
       } finally {
+        if (sessionIdBefore) this.#activeAskSessions.delete(sessionIdBefore);
         await Promise.allSettled([
           this.#cancelPendingInteraction(key),
           this.#approvals.closeRoute(key),

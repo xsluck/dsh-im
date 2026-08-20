@@ -511,6 +511,47 @@ export class HarnessClient {
     }
   }
 
+  async watchAllInteractions({
+    signal,
+    onInteraction,
+    onResolved,
+    onOpen,
+  } = {}) {
+    if (!signal || typeof signal.addEventListener !== 'function') {
+      throw new TypeError('watchAllInteractions requires an AbortSignal');
+    }
+    if (onInteraction !== undefined && typeof onInteraction !== 'function') {
+      throw new TypeError('onInteraction must be a function');
+    }
+    if (onResolved !== undefined && typeof onResolved !== 'function') {
+      throw new TypeError('onResolved must be a function');
+    }
+    if (onOpen !== undefined && typeof onOpen !== 'function') {
+      throw new TypeError('onOpen must be a function');
+    }
+
+    while (!signal.aborted) {
+      try {
+        await this.#watchInteractionSocket(null, {
+          signal,
+          onInteraction,
+          onResolved,
+          onOpen,
+        });
+      } catch (error) {
+        if (signal.aborted) return;
+        console.warn(`[${this.#logPrefix}] Harness interaction stream disconnected:`, error.message);
+      }
+      if (signal.aborted) return;
+      try {
+        await sleep(this.#interactionReconnectDelayMs, signal);
+      } catch {
+        if (signal.aborted) return;
+        throw new Error('Harness interaction reconnect wait failed');
+      }
+    }
+  }
+
   #registerInteractionOwnership(sessionId, ownership) {
     const owners = this.#interactionOwnerships.get(sessionId) ?? new Set();
     ownership.order = this.#interactionRegistry.nextOrder;
@@ -755,12 +796,13 @@ export class HarnessClient {
             finish(callbackFailure);
           });
       };
-      const processEnvelope = (envelope) => {
+      const processEnvelope = (envelope, eventSessionId = sessionId) => {
         const payload = envelope.payload;
         if (ownership && payload.type === 'session/event') {
           this.#consumeInteractionOwnerships(sessionId, [payload.event]);
           return;
         }
+        if (ownership && eventSessionId !== sessionId) return;
         if (payload.type === 'question/requested' || payload.type === 'approval/requested') {
           const kind = payload.type === 'question/requested' ? 'question' : 'approval';
           const interactionId = kind === 'question' ? envelope.rpcId : payload.approvalId;
@@ -777,7 +819,7 @@ export class HarnessClient {
             kind,
             interactionId,
             rpcId: envelope.rpcId,
-            sessionId,
+            sessionId: eventSessionId,
             payload,
             recovered: ownership
               ? this.#interactionClaims.get(claimKey)?.recovered === true
@@ -806,7 +848,7 @@ export class HarnessClient {
           dispatch(onResolved, Object.freeze({
             kind,
             interactionId,
-            sessionId,
+            sessionId: eventSessionId,
             outcome: payload.outcome,
             payload,
           }));
@@ -823,9 +865,13 @@ export class HarnessClient {
             || envelope.method !== payload.type) {
             throw new Error('invalid server-request envelope');
           }
-          if (payload.sessionId !== sessionId) return;
+          const eventSessionId = typeof payload.sessionId === 'string' && payload.sessionId
+            ? payload.sessionId
+            : null;
+          if (!eventSessionId) return;
+          if (sessionId !== null && eventSessionId !== sessionId) return;
           if (!ownershipReady) bufferedEnvelopes.push(envelope);
-          else processEnvelope(envelope);
+          else processEnvelope(envelope, eventSessionId);
         } catch (error) {
           console.warn(`[${this.#logPrefix}] ignored a malformed Harness interaction frame:`, error.message);
         }

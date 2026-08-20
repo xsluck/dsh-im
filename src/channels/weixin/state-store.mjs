@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 const EMPTY_STATE = Object.freeze({
   version: 1,
   sessions: {},
+  routes: {},
   seenMessageIds: [],
   getUpdatesBuf: '',
 });
@@ -18,9 +19,18 @@ function normalizeState(value) {
       }
     }
   }
+  const routes = {};
+  if (value.routes && typeof value.routes === 'object' && !Array.isArray(value.routes)) {
+    for (const [key, route] of Object.entries(value.routes)) {
+      if (typeof key === 'string' && key && route && typeof route === 'object') {
+        routes[key] = route;
+      }
+    }
+  }
   return {
     version: 1,
     sessions,
+    routes,
     seenMessageIds: Array.isArray(value.seenMessageIds)
       ? value.seenMessageIds.filter((id) => typeof id === 'string').slice(-1_000)
       : [],
@@ -64,7 +74,27 @@ export class WeixinStateStore {
 
   async clearSessions() {
     this.#state.sessions = {};
+    this.#state.routes = {};
     await this.#persist();
+  }
+
+  routeFor(key) {
+    return this.#state.routes[key] ?? null;
+  }
+
+  async setRoute(key, route) {
+    this.#state.routes[key] = route;
+    await this.#persist();
+  }
+
+  async removeRoute(key) {
+    if (!this.#state.routes[key]) return;
+    delete this.#state.routes[key];
+    await this.#persist();
+  }
+
+  routeEntries() {
+    return Object.entries(this.#state.routes);
   }
 
   hasSeen(messageId) {

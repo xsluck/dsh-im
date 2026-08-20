@@ -131,6 +131,7 @@ export class WeixinRuntime {
         maxMessageChars: this.#maxMessageChars,
         signal,
       });
+      this.#bridge.startForwarding();
       this.#status.ready = true;
       this.#status.weixinConnectionState = 'connected';
       this.#status.lastCheckedAt = Date.now();

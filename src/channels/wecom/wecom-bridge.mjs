@@ -7,6 +7,7 @@ import {
 import { HarnessApprovalQueue } from '../shared/harness-approval.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
+import { InteractionForwarder } from '../shared/interaction-forwarder.mjs';
 
 const HELP_TEXT = [
   '企业微信机器人已连接 DeepSeek Harness。',
@@ -17,6 +18,9 @@ const HELP_TEXT = [
   '/workspacelist  列出工作区绝对路径',
   '/sessionlist [工作区序号或绝对路径]  列出会话 ID 和标题',
   '/session Session ID  将当前聊天绑定到指定会话',
+  '/watch Session ID  将指定网页会话的提问/审批转发到当前聊天（不换绑）',
+  '/watch *  默认转发所有网页会话的提问/审批到当前聊天',
+  '/unwatch  取消当前聊天的转发设置（不影响会话绑定）',
   '/status  检查连接状态',
   '/help  显示本帮助',
 ].join('\n');
@@ -117,6 +121,9 @@ export class WecomHarnessBridge {
   #acceptedMessageIds = new Set();
   #approvalTasks = new Set();
   #approvals;
+  #forwarder;
+  #forwarderStarted = false;
+  #activeAskSessions = new Set();
 
   constructor({
     client,
@@ -141,10 +148,93 @@ export class WecomHarnessBridge {
     this.#generateReqId = generateStreamId;
     this.#signal = signal;
     this.#approvals = new HarnessApprovalQueue({ label: 'wecom', logger });
+    this.#forwarder = new InteractionForwarder({
+      harness,
+      signal,
+      logger,
+      onInteraction: (interaction, route) => {
+        if (this.#activeAskSessions.has(interaction.sessionId)) return;
+        return this.#handleInteraction(interaction, {
+          key: route.key,
+          actor: route.actor,
+          chatId: route.chatId,
+          requiresMention: route.requiresMention === true,
+        });
+      },
+      onResolved: (resolution) => this.#handleInteractionResolved(resolution),
+    });
   }
 
   get status() {
     return structuredClone(this.#status);
+  }
+
+  startForwarding() {
+    if (this.#forwarderStarted) return;
+    this.#forwarderStarted = true;
+    if (typeof this.#state.routeEntries !== 'function') return;
+    for (const [key, route] of this.#state.routeEntries()) {
+      this.#registerRoute({ ...route, key });
+    }
+  }
+
+  async #recordRoute({ key, actor, sessionId, chatId, requiresMention }) {
+    if (!key || !actor || !sessionId || !chatId) return;
+    const route = {
+      sessionId,
+      actor,
+      chatId,
+      requiresMention: requiresMention === true,
+      updatedAt: Date.now(),
+    };
+    if (sessionId === '*') {
+      this.#forwarder.setDefaultRoute({
+        ...route,
+        key,
+        send: (text) => this.#sendActive(chatId, text),
+      });
+    } else {
+      this.#forwarder.setRoute({
+        ...route,
+        key,
+        send: (text) => this.#sendActive(chatId, text),
+      });
+    }
+    if (typeof this.#state.setRoute === 'function') {
+      try {
+        await this.#state.setRoute(key, route);
+      } catch (error) {
+        this.#logger.warn?.('[dsh-im:wecom] failed to persist an interaction route:', error);
+      }
+    }
+  }
+
+  #registerRoute(route) {
+    const sessionId = route?.sessionId || this.#state.sessionFor(route?.key);
+    const actor = route?.actor;
+    const chatId = route?.chatId;
+    if (!sessionId || !actor || !chatId) return;
+    if (sessionId === '*') {
+      this.#forwarder.setDefaultRoute({
+        sessionId,
+        key: route.key,
+        actor,
+        chatId,
+        requiresMention: route.requiresMention === true,
+        updatedAt: route.updatedAt,
+        send: (text) => this.#sendActive(chatId, text),
+      });
+    } else {
+      this.#forwarder.setRoute({
+        sessionId,
+        key: route.key,
+        actor,
+        chatId,
+        requiresMention: route.requiresMention === true,
+        updatedAt: route.updatedAt,
+        send: (text) => this.#sendActive(chatId, text),
+      });
+    }
   }
 
   accept(frame) {
@@ -289,6 +379,7 @@ export class WecomHarnessBridge {
     const key = conversationKey(frame);
     let streamId = null;
     let streamStarted = false;
+    let sessionIdBefore = null;
     try {
       if (!text) {
         await this.#sendImmediate(frame, chatId, '目前支持文字、语音转写和图文混排中的文字消息。');
@@ -309,12 +400,75 @@ export class WecomHarnessBridge {
       }
       if (command === '/new') {
         await this.#state.clearSession(key);
-        await this.#sendImmediate(frame, chatId, '已开启新会话。请发送你的问题。');
+        await this.#sendImmediate(frame, chatId, '已开启新会话。请发送你的问题。转发设置未变化；如需关闭请使用 /unwatch。');
+        await this.#state.markSeen(messageId);
+        return;
+      }
+      if (/^\/unwatch(?:\s|$)/i.test(text.trim())) {
+        this.#forwarder.removeRoute(key);
+        if (typeof this.#state.removeRoute === 'function') {
+          try {
+            await this.#state.removeRoute(key);
+          } catch (error) {
+            this.#logger.warn?.('[dsh-im:wecom] failed to remove a route:', error);
+          }
+        }
+        await this.#sendImmediate(frame, chatId, '已关闭当前聊天的转发设置，原有会话绑定不变。');
+        await this.#state.markSeen(messageId);
+        return;
+      }
+      const watchCommand = /^\/watch(?:\s+([^\s]+))?$/i.exec(text.trim());
+      if (watchCommand) {
+        const sessionId = watchCommand[1];
+        if (!sessionId || sessionId.length > 256 || /\p{White_Space}/u.test(sessionId)) {
+          await this.#sendImmediate(frame, chatId, '用法：/watch Session ID，或 /watch * 默认转发所有会话');
+          await this.#state.markSeen(messageId);
+          return;
+        }
+        try {
+          if (sessionId !== '*') {
+            if (typeof this.#harness?.sessionExists === 'function') {
+              const exists = await this.#harness.sessionExists(sessionId, { signal: this.#signal });
+              if (!exists) {
+                await this.#sendImmediate(frame, chatId, '未找到该会话，请先执行 /sessionlist 确认 Session ID。');
+                await this.#state.markSeen(messageId);
+                return;
+              }
+            }
+          }
+          await this.#recordRoute({
+            key,
+            actor: senderId,
+            sessionId,
+            chatId,
+            requiresMention: body.chattype === 'group',
+          });
+          if (sessionId === '*') {
+            await this.#sendImmediate(frame, chatId, '已开启默认转发：以后所有网页会话的提问/审批都会推送到当前聊天，不影响会话绑定。');
+          } else {
+            await this.#sendImmediate(frame, chatId, `已开启转发：Session ${sessionId} 的提问/审批会推送到当前聊天，不会改变当前聊天原本绑定的会话。`);
+          }
+        } catch (error) {
+          this.#logger.warn?.('[dsh-wecom] failed to watch session:', error);
+          await this.#sendImmediate(frame, chatId, '暂时无法开启转发，请稍后重试。');
+        }
         await this.#state.markSeen(messageId);
         return;
       }
       const workspaceCommand = await runWorkspaceCommand(text, this.#harness, key);
       if (workspaceCommand) {
+        const sessionId = this.#state.sessionFor(key);
+        if (sessionId) {
+          await this.#recordRoute({
+            key,
+            actor: senderId,
+            sessionId,
+            chatId,
+            requiresMention: body.chattype === 'group',
+          });
+        } else if (/^\/workspace(?:\s|$)/i.test(text.trim())) {
+          this.#forwarder.stop();
+        }
         for (const reply of workspaceCommand.messages ?? [workspaceCommand.message]) {
           await this.#sendImmediate(frame, chatId, reply);
         }
@@ -331,7 +485,9 @@ export class WecomHarnessBridge {
       }
 
       let interactionPending = false;
-      const { answer } = await askInWorkspaceSession({
+      sessionIdBefore = this.#state.sessionFor(key);
+      if (sessionIdBefore) this.#activeAskSessions.add(sessionIdBefore);
+      const { sessionId, answer } = await askInWorkspaceSession({
         harness: this.#harness,
         state: this.#state,
         key,
@@ -362,6 +518,13 @@ export class WecomHarnessBridge {
             this.#handleInteractionResolved(resolution);
           },
         },
+      });
+      await this.#recordRoute({
+        key,
+        actor: senderId,
+        sessionId,
+        chatId,
+        requiresMention: body.chattype === 'group',
       });
 
       const chunks = splitUtf8(answer || '任务已完成，但没有生成可显示的文本。');
@@ -397,6 +560,7 @@ export class WecomHarnessBridge {
         this.#logger.error?.('[dsh-im:wecom] failed to send the safe error reply');
       }
     } finally {
+      if (sessionIdBefore) this.#activeAskSessions.delete(sessionIdBefore);
       await Promise.allSettled([
         this.#cancelPendingInteraction(key),
         this.#approvals.closeRoute(key),
