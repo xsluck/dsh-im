@@ -1,4 +1,5 @@
 import {
+  extractWeixinImages,
   extractWeixinText,
   splitWeixinText,
   weixinMessageId,
@@ -9,24 +10,45 @@ import {
   validHarnessQuestion,
 } from '../shared/harness-question.mjs';
 import { HarnessApprovalQueue } from '../shared/harness-approval.mjs';
+import { runCompactCommand } from '../shared/compact-command.mjs';
+import {
+  isControlCommand,
+  runControlCommand,
+} from '../shared/control-command.mjs';
+import {
+  isModelCommand,
+  runModelCommand,
+} from '../shared/model-command.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
 import { InteractionForwarder } from '../shared/interaction-forwarder.mjs';
+import {
+  hasInboundImages,
+  imagePromptUserMessage,
+  promptContentForMessage,
+} from '../shared/image-prompt.mjs';
+import { rememberConnectionTestTarget } from '../shared/connection-test.mjs';
 
 const INTERACTION_RESOLVED_TEXT = '这个问题已在其他客户端处理，无需再次回答。';
 
 const HELP_TEXT = [
   '微信已连接 DeepSeek Harness。',
   '',
-  '直接发送文字或带文字识别结果的语音即可继续当前会话。',
+  '直接发送文字、图片或带文字识别结果的语音即可继续当前会话。',
   '/new  开启一个全新会话',
+  '/compact  压缩当前会话的较早上下文',
   '/workspace 工作区绝对路径  切换工作区',
   '/workspacelist  列出工作区绝对路径',
   '/sessionlist [工作区序号或绝对路径]  列出会话 ID 和标题',
-  '/session Session ID  将当前聊天绑定到指定会话',
+  '/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话',
   '/watch Session ID  将指定网页会话的提问/审批转发到当前聊天（不换绑）',
   '/watch *  默认转发所有网页会话的提问/审批到当前聊天',
   '/unwatch  取消当前聊天的转发设置（不影响会话绑定）',
+  '/models  按序号列出所有可用模型',
+  '/model [序号或完整模型ID]  查看或切换当前会话模型',
+  '示例：先发 /models，再发 /model 2',
+  '/stop  停止当前任务',
+  '/steer 补充指令  纠偏当前任务',
   '/status  检查连接状态',
   '/help  显示本帮助',
 ].join('\n');
@@ -39,9 +61,15 @@ function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function hasWeixinImageItems(message) {
+  return Array.isArray(message?.item_list)
+    && message.item_list.some((item) => item?.image_item && typeof item.image_item === 'object');
+}
+
 function canClaimInteractionReply(message, pending) {
   return pending.questions[pending.index]
     && nonEmptyString(message?.from_user_id) === pending.actor
+    && !hasWeixinImageItems(message)
     && nonEmptyString(extractWeixinText(message));
 }
 
@@ -74,6 +102,7 @@ export class WeixinHarnessBridge {
   #interactionKeys = new Map();
   #acceptedMessageIds = new Set();
   #approvalTasks = new Set();
+  #commandTasks = new Set();
   #approvals;
   #forwarder;
   #forwarderStarted = false;
@@ -203,15 +232,46 @@ export class WeixinHarnessBridge {
     if (!messageId || !sender || this.#state.hasSeen(messageId)
       || this.#acceptedMessageIds.has(messageId)) return Promise.resolve();
     this.#acceptedMessageIds.add(messageId);
+    if (sender === this.#ownerUserId) {
+      rememberConnectionTestTarget(this.#state, { toUserId: sender });
+    }
     const key = conversationKey(sender);
     const contextToken = nonEmptyString(message?.context_token) ?? undefined;
     const runId = nonEmptyString(message?.run_id) ?? undefined;
     const pending = this.#pendingInteractions.get(key);
+    const commandText = nonEmptyString(extractWeixinText(message)) ?? '';
+    const commandRunner = isControlCommand(commandText)
+      ? runControlCommand
+      : (isModelCommand(commandText) ? runModelCommand : null);
+    if (commandRunner && sender === this.#ownerUserId) {
+      let task;
+      task = this.#processFastCommand(
+        message,
+        messageId,
+        key,
+        sender,
+        contextToken,
+        runId,
+        commandText,
+        commandRunner,
+      ).catch((error) => {
+        if (error?.code === 'turn-stopped' || this.#signal?.aborted) return;
+        this.#status.lastError = error?.message ?? String(error);
+        this.#logger.error?.('[dsh-weixin] failed to process a command:', error);
+        return this.#send(sender, '消息处理失败，请稍后重试。', contextToken, runId)
+          .catch(() => undefined);
+      }).finally(() => {
+        this.#acceptedMessageIds.delete(messageId);
+        this.#commandTasks.delete(task);
+      });
+      this.#commandTasks.add(task);
+      return task;
+    }
     const approval = this.#approvals.claimReply({
       key,
       actor: sender,
       messageId,
-      text: extractWeixinText(message),
+      text: hasWeixinImageItems(message) ? '' : extractWeixinText(message),
       addressed: true,
       hasPendingQuestion: Boolean(pending),
       questionCompletion: pending?.submitting || pending?.claimedReplyMessageId
@@ -282,7 +342,42 @@ export class WeixinHarnessBridge {
         pending.queue ? [pending.queue] : []
       )),
       ...this.#approvalTasks,
+      ...this.#commandTasks,
     ]);
+  }
+
+  async #processFastCommand(
+    message,
+    messageId,
+    key,
+    sender,
+    contextToken,
+    runId,
+    text,
+    runner,
+  ) {
+    this.#signal?.throwIfAborted();
+    if (this.#state.hasSeen(messageId)) return;
+    await this.#state.markSeen(messageId);
+    this.#status.messagesReceived += 1;
+    this.#status.lastMessageAt = new Date().toISOString();
+    const result = await runner(text, this.#harness, this.#state, key, {
+      signal: this.#signal,
+      hasImages: hasWeixinImageItems(message),
+      pendingInteraction: this.#pendingInteractions.has(key)
+        || this.#approvals.hasPending(key),
+      control: { owner: this, key },
+    });
+    if (result?.stopped) {
+      await Promise.allSettled([
+        this.#cancelPendingInteraction(key),
+        this.#approvals.closeRoute(key),
+      ]);
+    }
+    for (const reply of result?.messages ?? [result?.message]) {
+      if (reply) await this.#send(sender, reply, contextToken, runId);
+    }
+    this.#status.lastError = null;
   }
 
   async #process(message, key, { alreadyRecorded = false } = {}) {
@@ -303,27 +398,32 @@ export class WeixinHarnessBridge {
 
     const contextToken = typeof message.context_token === 'string' ? message.context_token : undefined;
     const runId = typeof message.run_id === 'string' ? message.run_id : undefined;
-    const text = extractWeixinText(message);
+    const text = extractWeixinText(message) ?? '';
     try {
-      if (!text) {
-        await this.#send(sender, '目前仅支持文字消息，以及微信已转成文字的语音消息。', contextToken, runId);
+      const images = typeof this.#api.inboundImages === 'function'
+        ? this.#api.inboundImages(message)
+        : extractWeixinImages(message);
+      const promptMessage = { content: text, images };
+      const hasImages = hasInboundImages(promptMessage);
+      if (!text && !hasImages) {
+        await this.#send(sender, '目前支持文字、图片，以及微信已转成文字的语音消息。', contextToken, runId);
         await this.#state.markSeen(messageId);
         return;
       }
 
       const command = text.trim().toLowerCase();
-      if (command === '/help') {
+      if (!hasImages && command === '/help') {
         await this.#send(sender, HELP_TEXT, contextToken, runId);
         await this.#state.markSeen(messageId);
         return;
       }
-      if (command === '/status') {
+      if (!hasImages && command === '/status') {
         await this.#harness.ensureRunning({ signal: this.#signal });
         await this.#send(sender, '微信与 DeepSeek Harness 连接正常。', contextToken, runId);
         await this.#state.markSeen(messageId);
         return;
       }
-      if (command === '/new') {
+      if (!hasImages && command === '/new') {
         await this.#state.clearSession(key);
         await this.#send(sender, '已开启新会话。请发送你的问题。转发设置未变化；如需关闭请使用 /unwatch。', contextToken, runId);
         await this.#state.markSeen(messageId);
@@ -374,7 +474,9 @@ export class WeixinHarnessBridge {
         await this.#state.markSeen(messageId);
         return;
       }
-      const workspaceCommand = await runWorkspaceCommand(text, this.#harness, key);
+      const workspaceCommand = hasImages
+        ? null
+        : await runWorkspaceCommand(text, this.#harness, key);
       if (workspaceCommand) {
         const sessionId = this.#state.sessionFor(key);
         if (sessionId) {
@@ -388,7 +490,24 @@ export class WeixinHarnessBridge {
         await this.#state.markSeen(messageId);
         return;
       }
+      const compactCommand = hasImages
+        ? null
+        : await runCompactCommand(
+            text,
+            this.#harness,
+            this.#state,
+            key,
+            { signal: this.#signal },
+          );
+      if (compactCommand) {
+        await this.#send(sender, compactCommand.message, contextToken, runId);
+        await this.#state.markSeen(messageId);
+        return;
+      }
 
+      const content = hasImages
+        ? await promptContentForMessage(promptMessage, { signal: this.#signal })
+        : undefined;
       let sessionId = null;
       let answer;
       const sessionIdBefore = this.#state.sessionFor(key);
@@ -398,12 +517,13 @@ export class WeixinHarnessBridge {
           harness: this.#harness,
           state: this.#state,
           key,
-          text,
+          ...(hasImages ? { content } : { text }),
           createOptions: { signal: this.#signal },
           existsOptions: { signal: this.#signal },
           askOptions: {
             timeoutMs: this.#replyTimeoutMs,
             signal: this.#signal,
+            control: { owner: this, key },
             onInteraction: (interaction) => this.#handleInteraction(interaction, {
               key,
               actor: sender,
@@ -433,11 +553,20 @@ export class WeixinHarnessBridge {
       this.#status.lastReplyAt = new Date().toISOString();
       this.#status.lastError = null;
     } catch (error) {
+      if (error?.code === 'turn-stopped') {
+        await this.#state.markSeen(messageId);
+        return;
+      }
       if (this.#signal?.aborted) return;
       this.#status.lastError = error?.message ?? String(error);
       this.#logger.error?.('[dsh-weixin] failed to process an inbound message:', error);
       try {
-        await this.#send(sender, '消息处理失败，请稍后重试。', contextToken, runId);
+        await this.#send(
+          sender,
+          imagePromptUserMessage(error) ?? '消息处理失败，请稍后重试。',
+          contextToken,
+          runId,
+        );
         await this.#state.markSeen(messageId);
       } catch (sendError) {
         this.#logger.error?.('[dsh-weixin] failed to send the safe error reply:', sendError);
@@ -463,7 +592,7 @@ export class WeixinHarnessBridge {
     const text = nonEmptyString(extractWeixinText(message));
     const contextToken = nonEmptyString(message?.context_token) ?? undefined;
     const runId = nonEmptyString(message?.run_id) ?? undefined;
-    if (!text) {
+    if (!text || hasWeixinImageItems(message)) {
       await this.#send(
         expected.actor,
         '请用文字回答当前问题。',

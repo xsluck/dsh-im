@@ -1,6 +1,24 @@
 import { runWorkspaceCommand } from './workspace-command.mjs';
+import { runCompactCommand } from './compact-command.mjs';
+import {
+  isControlCommand,
+  runControlCommand,
+} from './control-command.mjs';
+import {
+  rememberConnectionTestTarget,
+  sendRememberedConnectionTest,
+} from './connection-test.mjs';
+import {
+  isModelCommand,
+  runModelCommand,
+} from './model-command.mjs';
 import { askInWorkspaceSession } from './workspace-session.mjs';
 import { HarnessApprovalQueue } from './harness-approval.mjs';
+import {
+  hasInboundImages,
+  imagePromptUserMessage,
+  promptContentForMessage,
+} from './image-prompt.mjs';
 import {
   harnessAnswerForQuestion,
   harnessQuestionText,
@@ -16,6 +34,7 @@ function cleanText(value) {
 function canClaimInteractionReply(message, pending, senderId) {
   return pending.actor === senderId
     && (message.kind !== 'group' || message.addressed === true)
+    && !hasInboundImages(message)
     && Boolean(cleanText(message.content));
 }
 
@@ -45,6 +64,7 @@ export class TextHarnessBridge {
   #interactionKeys = new Map();
   #acceptedMessageIds = new Set();
   #approvalTasks = new Set();
+  #commandTasks = new Set();
   #approvals;
 
   constructor({
@@ -90,14 +110,38 @@ export class TextHarnessBridge {
       return Promise.resolve();
     }
     this.#acceptedMessageIds.add(messageId);
+    if (normalized.kind === 'direct') {
+      rememberConnectionTestTarget(
+        this.#state,
+        normalized.connectionTestTarget ?? normalized.replyTarget,
+      );
+    }
 
     const key = `${kind}:${conversationId}`;
     const pending = this.#pendingInteractions.get(key);
+    const text = cleanText(normalized.content);
+    const commandRunner = isControlCommand(text)
+      ? runControlCommand
+      : (isModelCommand(text) ? runModelCommand : null);
+    if (commandRunner && (normalized.kind !== 'group' || normalized.addressed === true)) {
+      let task;
+      task = this.#processFastCommand(
+        normalized,
+        messageId,
+        key,
+        commandRunner,
+      ).finally(() => {
+        this.#acceptedMessageIds.delete(messageId);
+        this.#commandTasks.delete(task);
+      });
+      this.#commandTasks.add(task);
+      return task;
+    }
     const approval = this.#approvals.claimReply({
       key,
       actor: senderId,
       messageId,
-      text: normalized.content,
+      text: hasInboundImages(normalized) ? '' : normalized.content,
       addressed: normalized.kind !== 'group' || normalized.addressed === true,
       hasPendingQuestion: Boolean(pending),
       questionCompletion: pending?.submitting || pending?.claimedReplyMessageId
@@ -184,7 +228,55 @@ export class TextHarnessBridge {
         pending.queue ? [pending.queue] : []
       )),
       ...this.#approvalTasks,
+      ...this.#commandTasks,
     ]);
+  }
+
+  async #processFastCommand(message, messageId, key, runner) {
+    if (this.#state.hasSeen(messageId)) return;
+    await this.#state.markSeen(messageId);
+    this.#status.messagesReceived += 1;
+    this.#status.lastMessageAt = new Date().toISOString();
+    const target = message.replyTarget;
+    try {
+      const result = await runner(
+        cleanText(message.content),
+        this.#harness,
+        this.#state,
+        key,
+        {
+          signal: this.#signal,
+          hasImages: hasInboundImages(message),
+          pendingInteraction: this.#pendingInteractions.has(key)
+            || this.#approvals.hasPending(key),
+          control: { owner: this, key },
+        },
+      );
+      if (result?.stopped) {
+        await Promise.allSettled([
+          this.#cancelPendingInteraction(key),
+          this.#approvals.closeRoute(key),
+        ]);
+      }
+      for (const reply of result?.messages ?? [result?.message]) {
+        if (reply) await this.#bot.sendText(target, reply);
+      }
+      this.#status.lastError = null;
+    } catch (error) {
+      if (error?.code === 'turn-stopped' || this.#signal?.aborted) return;
+      this.#status.lastError = error?.message ?? String(error);
+      this.#logger.error?.(`[dsh-im:${this.#descriptor.key}] failed to process a command:`, error);
+      await this.#bot.sendText(target, '消息处理失败，请稍后重试。').catch(() => undefined);
+    }
+  }
+
+  sendConnectionTest(text) {
+    return sendRememberedConnectionTest({
+      state: this.#state,
+      text,
+      channelLabel: `${this.#descriptor.label}机器人`,
+      send: (target, message) => this.#bot.sendText(target, message),
+    });
   }
 
   async #process(message, messageId, senderId, conversationKey, {
@@ -207,41 +299,63 @@ export class TextHarnessBridge {
         this.#status.lastRejectedAt = new Date().toISOString();
         return;
       }
-      if (!text) {
-        await this.#bot.sendText(target, '目前仅支持文字消息。');
+      const hasImages = hasInboundImages(message);
+      if (!text && !hasImages) {
+        await this.#bot.sendText(target, '目前支持文字和图片消息。');
         return;
       }
       const command = text.toLowerCase();
-      if (command === '/help') {
+      if (!hasImages && command === '/help') {
         await this.#bot.sendText(target, [
           `${this.#descriptor.label}机器人已连接 DeepSeek Harness。`,
           '',
-          '直接发送文字即可继续当前会话。',
+          '直接发送文字或图片即可继续当前会话。',
           '/new  开启一个全新会话',
+          '/compact  压缩当前会话的较早上下文',
           '/workspace 工作区绝对路径  切换工作区',
           '/workspacelist  列出工作区绝对路径',
           '/sessionlist [工作区序号或绝对路径]  列出会话 ID 和标题',
-          '/session Session ID  将当前聊天绑定到指定会话',
+          '/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话',
+          '/models  按序号列出所有可用模型',
+          '/model [序号或完整模型ID]  查看或切换当前会话模型',
+          '示例：先发 /models，再发 /model 2',
+          '/stop  停止当前任务',
+          '/steer 补充指令  纠偏当前任务',
           '/status  检查连接状态',
           '/help  显示本帮助',
         ].join('\n'));
         return;
       }
-      if (command === '/status') {
+      if (!hasImages && command === '/status') {
         await this.#harness.ensureRunning({ signal: this.#signal });
         await this.#bot.sendText(target, `${this.#descriptor.label}机器人与 DeepSeek Harness 连接正常。`);
         return;
       }
-      const workspaceCommand = await runWorkspaceCommand(text, this.#harness, conversationKey);
+      const workspaceCommand = !hasImages
+        ? await runWorkspaceCommand(text, this.#harness, conversationKey)
+        : null;
       if (workspaceCommand) {
         for (const reply of workspaceCommand.messages ?? [workspaceCommand.message]) {
           await this.#bot.sendText(target, reply);
         }
         return;
       }
-      if (command === '/new') {
+      if (!hasImages && command === '/new') {
         await this.#state.clearSession(conversationKey);
         await this.#bot.sendText(target, '已开启新会话。请发送你的问题。');
+        return;
+      }
+      const compactCommand = !hasImages
+        ? await runCompactCommand(
+            text,
+            this.#harness,
+            this.#state,
+            conversationKey,
+            { signal: this.#signal },
+          )
+        : null;
+      if (compactCommand) {
+        await this.#bot.sendText(target, compactCommand.message);
         return;
       }
 
@@ -259,16 +373,21 @@ export class TextHarnessBridge {
           );
         }
       }
+      const content = hasImages
+        ? await promptContentForMessage(message, { signal: this.#signal })
+        : undefined;
       const { answer } = await askInWorkspaceSession({
         harness: this.#harness,
         state: this.#state,
         key: conversationKey,
         text,
+        content,
         createOptions: this.#signal ? { signal: this.#signal } : undefined,
         existsOptions: this.#signal ? { signal: this.#signal } : undefined,
         askOptions: {
           timeoutMs: this.#replyTimeoutMs,
           signal: this.#signal,
+          control: { owner: this, key: conversationKey },
           onUpdate: stream ? async (update) => {
             const progress = update.type === 'text' ? update.text
               : update.type === 'tool' ? `正在使用${update.name}…` : update.text;
@@ -300,9 +419,31 @@ export class TextHarnessBridge {
       this.#status.lastReplyAt = new Date().toISOString();
       this.#status.lastError = null;
     } catch (error) {
+      if (error?.code === 'turn-stopped') {
+        if (stream) {
+          try {
+            await stream.finish('已停止。');
+          } catch {
+            stream.cancel?.();
+          }
+        }
+        return;
+      }
       stream?.cancel?.();
       if (this.#signal?.aborted) return;
       this.#status.lastError = error?.message ?? String(error);
+      const imageErrorMessage = imagePromptUserMessage(error);
+      if (imageErrorMessage) {
+        try {
+          await this.#bot.sendText(target, imageErrorMessage);
+        } catch (sendError) {
+          this.#logger.error?.(
+            `[dsh-im:${this.#descriptor.key}] failed to send the image error reply:`,
+            sendError,
+          );
+        }
+        return;
+      }
       this.#logger.error?.(`[dsh-im:${this.#descriptor.key}] failed to process a message:`, error);
       try {
         await this.#bot.sendText(target, '消息处理失败，请稍后重试。');
@@ -345,7 +486,7 @@ export class TextHarnessBridge {
 
     const target = message.replyTarget;
     const text = cleanText(message.content);
-    if (!text) {
+    if (!text || hasInboundImages(message)) {
       try {
         await this.#bot.sendText(target, '请用文字回答当前问题。');
       } catch (error) {

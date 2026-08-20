@@ -5,26 +5,50 @@ import {
   validHarnessQuestion,
 } from '../shared/harness-question.mjs';
 import { HarnessApprovalQueue } from '../shared/harness-approval.mjs';
+import { runCompactCommand } from '../shared/compact-command.mjs';
+import {
+  isControlCommand,
+  runControlCommand,
+} from '../shared/control-command.mjs';
+import {
+  isModelCommand,
+  runModelCommand,
+} from '../shared/model-command.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
 import { InteractionForwarder } from '../shared/interaction-forwarder.mjs';
+import {
+  hasInboundImages,
+  ImagePromptError,
+  imagePromptUserMessage,
+  promptContentForMessage,
+} from '../shared/image-prompt.mjs';
+import { rememberConnectionTestTarget } from '../shared/connection-test.mjs';
 
 const HELP_TEXT = [
   '企业微信机器人已连接 DeepSeek Harness。',
   '',
-  '直接发送文字即可继续当前会话。',
+  '直接发送文字或图片即可继续当前会话。',
   '/new  开启一个全新会话',
+  '/compact  压缩当前会话的较早上下文',
   '/workspace 工作区绝对路径  切换工作区',
   '/workspacelist  列出工作区绝对路径',
   '/sessionlist [工作区序号或绝对路径]  列出会话 ID 和标题',
-  '/session Session ID  将当前聊天绑定到指定会话',
+  '/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话',
   '/watch Session ID  将指定网页会话的提问/审批转发到当前聊天（不换绑）',
   '/watch *  默认转发所有网页会话的提问/审批到当前聊天',
   '/unwatch  取消当前聊天的转发设置（不影响会话绑定）',
+  '/models  按序号列出所有可用模型',
+  '/model [序号或完整模型ID]  查看或切换当前会话模型',
+  '示例：先发 /models，再发 /model 2',
+  '/stop  停止当前任务',
+  '/steer 补充指令  纠偏当前任务',
   '/status  检查连接状态',
   '/help  显示本帮助',
 ].join('\n');
 const MAX_REPLY_BYTES = 18_000;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_PREFETCHED_IMAGES = 4;
 const INTERACTION_RESOLVED_TEXT = '这个问题已在其他客户端处理，无需再次回答。';
 
 function nonEmptyString(value) {
@@ -61,6 +85,102 @@ function messageText(frame) {
     : text;
 }
 
+function imageContents(frame) {
+  const body = bodyOf(frame);
+  if (body.msgtype === 'image') return [body.image];
+  if (body.msgtype !== 'mixed' || !Array.isArray(body.mixed?.msg_item)) return [];
+  return body.mixed.msg_item
+    .filter((item) => item?.msgtype === 'image')
+    .map((item) => item.image);
+}
+
+function imageSource(client, image) {
+  const url = nonEmptyString(image?.url);
+  if (!url) return null;
+  const aeskey = nonEmptyString(image?.aeskey) ?? undefined;
+  return {
+    async load({ signal, maxBytes }) {
+      signal?.throwIfAborted();
+      if (typeof client?.downloadFile !== 'function') {
+        throw new Error('Enterprise WeChat image download is unavailable');
+      }
+      const result = await client.downloadFile(url, aeskey);
+      signal?.throwIfAborted();
+      const raw = result?.buffer;
+      if (!Buffer.isBuffer(raw) && !(raw instanceof Uint8Array)) {
+        throw new Error('Enterprise WeChat image download returned no data');
+      }
+      const data = Buffer.from(raw);
+      if (Number.isFinite(maxBytes) && data.length > maxBytes) {
+        throw new ImagePromptError(
+          'image-too-large',
+          `Enterprise WeChat image exceeds ${maxBytes} bytes`,
+          '图片超过 5 MB，请压缩后重试。',
+        );
+      }
+      return { data, name: result?.filename };
+    },
+  };
+}
+
+export function wecomInboundMessage(frame, client) {
+  return {
+    content: messageText(frame),
+    images: imageContents(frame).map((image) => imageSource(client, image)).filter(Boolean),
+  };
+}
+
+function prefetchInboundImages(message, signal) {
+  if (!hasInboundImages(message)) return message;
+  return {
+    ...message,
+    images: message.images.map((source) => {
+      const download = source.load({ signal, maxBytes: MAX_IMAGE_BYTES });
+      // The conversation queue may not consume this promise immediately. Keep
+      // an attached rejection handler while preserving the original outcome.
+      download.catch(() => undefined);
+      return {
+        ...source,
+        async load({ signal: loadSignal, maxBytes = MAX_IMAGE_BYTES } = {}) {
+          loadSignal?.throwIfAborted();
+          const result = await download;
+          loadSignal?.throwIfAborted();
+          const raw = result?.data ?? result?.buffer ?? result;
+          const size = Buffer.isBuffer(raw) || raw instanceof Uint8Array ? raw.length : 0;
+          if (size > maxBytes) {
+            throw new ImagePromptError(
+              'image-too-large',
+              `Enterprise WeChat image exceeds ${maxBytes} bytes`,
+              '图片超过 5 MB，请压缩后重试。',
+            );
+          }
+          return result;
+        },
+      };
+    }),
+  };
+}
+
+function imageQueueFullMessage(message) {
+  return {
+    ...message,
+    images: message.images.map((source) => ({
+      ...source,
+      async load() {
+        throw new ImagePromptError(
+          'image-queue-full',
+          `Enterprise WeChat already has ${MAX_PREFETCHED_IMAGES} prefetched images`,
+          '当前待处理图片较多，请稍后重新发送。',
+        );
+      },
+    })),
+  };
+}
+
+function interactionReplyText(frame) {
+  return bodyOf(frame).msgtype === 'text' ? messageText(frame) : '';
+}
+
 function splitUtf8(text, maxBytes = MAX_REPLY_BYTES) {
   const source = String(text ?? '').trim();
   if (!source) return [];
@@ -91,7 +211,7 @@ function progressText(update) {
 function canClaimInteractionReply(frame, pending) {
   return pending.questions[pending.index]
     && nonEmptyString(bodyOf(frame).from?.userid) === pending.actor
-    && nonEmptyString(messageText(frame));
+    && nonEmptyString(interactionReplyText(frame));
 }
 
 export function createWecomBridgeStatus() {
@@ -120,10 +240,12 @@ export class WecomHarnessBridge {
   #interactionKeys = new Map();
   #acceptedMessageIds = new Set();
   #approvalTasks = new Set();
+  #commandTasks = new Set();
   #approvals;
   #forwarder;
   #forwarderStarted = false;
   #activeAskSessions = new Set();
+  #prefetchedImageCount = 0;
 
   constructor({
     client,
@@ -252,12 +374,42 @@ export class WecomHarnessBridge {
 
     const key = conversationKey(frame);
     this.#acceptedMessageIds.add(messageId);
+    if (body.chattype === 'single') {
+      rememberConnectionTestTarget(this.#state, { chatId });
+    }
     const pending = this.#pendingInteractions.get(key);
+    const commandMessage = wecomInboundMessage(frame, this.#client);
+    const commandText = nonEmptyString(commandMessage.content) ?? '';
+    const commandRunner = isControlCommand(commandText)
+      ? runControlCommand
+      : (isModelCommand(commandText) ? runModelCommand : null);
+    if (commandRunner) {
+      let task;
+      task = this.#processFastCommand(
+        frame,
+        messageId,
+        chatId,
+        key,
+        commandMessage,
+        commandRunner,
+      ).catch((error) => {
+        if (error?.code === 'turn-stopped' || this.#signal?.aborted) return;
+        this.#status.lastError = error?.message ?? String(error);
+        this.#logger.error?.('[dsh-im:wecom] failed to process a command');
+        return this.#sendImmediate(frame, chatId, '消息处理失败，请稍后重试。')
+          .catch(() => undefined);
+      }).finally(() => {
+        this.#acceptedMessageIds.delete(messageId);
+        this.#commandTasks.delete(task);
+      });
+      this.#commandTasks.add(task);
+      return task;
+    }
     const approval = this.#approvals.claimReply({
       key,
       actor: senderId,
       messageId,
-      text: messageText(frame),
+      text: interactionReplyText(frame),
       addressed: true,
       hasPendingQuestion: Boolean(pending),
       questionCompletion: pending?.submitting || pending?.claimedReplyMessageId
@@ -320,11 +472,28 @@ export class WecomHarnessBridge {
     releaseMessageId = true,
     alreadyRecorded = false,
   } = {}) {
+    // WeCom image URLs expire after five minutes, while a conversation turn
+    // may legally stay queued longer. Start the authenticated SDK download as
+    // soon as the validated callback is accepted, then consume it in order.
+    const inboundMessage = wecomInboundMessage(frame, this.#client);
+    const imageCount = inboundMessage.images.length;
+    let reservedImages = 0;
+    let preparedMessage = inboundMessage;
+    if (imageCount > 0) {
+      if (this.#prefetchedImageCount + imageCount <= MAX_PREFETCHED_IMAGES) {
+        reservedImages = imageCount;
+        this.#prefetchedImageCount += reservedImages;
+        preparedMessage = prefetchInboundImages(inboundMessage, this.#signal);
+      } else {
+        preparedMessage = imageQueueFullMessage(inboundMessage);
+      }
+    }
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
-      .then(() => this.#process(frame, { alreadyRecorded }))
+      .then(() => this.#process(frame, { alreadyRecorded, preparedMessage }))
       .finally(() => {
+        this.#prefetchedImageCount -= reservedImages;
         if (releaseMessageId) this.#acceptedMessageIds.delete(messageId);
         if (this.#queues.get(key) === current) this.#queues.delete(key);
       });
@@ -339,7 +508,33 @@ export class WecomHarnessBridge {
         pending.queue ? [pending.queue] : []
       )),
       ...this.#approvalTasks,
+      ...this.#commandTasks,
     ]);
+  }
+
+  async #processFastCommand(frame, messageId, chatId, key, message, runner) {
+    this.#signal?.throwIfAborted();
+    if (this.#state.hasSeen(messageId)) return;
+    await this.#state.markSeen(messageId);
+    this.#status.messagesReceived += 1;
+    this.#status.lastMessageAt = new Date().toISOString();
+    const result = await runner(message.content, this.#harness, this.#state, key, {
+      signal: this.#signal,
+      hasImages: hasInboundImages(message),
+      pendingInteraction: this.#pendingInteractions.has(key)
+        || this.#approvals.hasPending(key),
+      control: { owner: this, key },
+    });
+    if (result?.stopped) {
+      await Promise.allSettled([
+        this.#cancelPendingInteraction(key),
+        this.#approvals.closeRoute(key),
+      ]);
+    }
+    for (const reply of result?.messages ?? [result?.message]) {
+      if (reply) await this.#sendImmediate(frame, chatId, reply);
+    }
+    this.#status.lastError = null;
   }
 
   async #sendActive(chatId, text) {
@@ -363,7 +558,7 @@ export class WecomHarnessBridge {
     }
   }
 
-  async #process(frame, { alreadyRecorded = false } = {}) {
+  async #process(frame, { alreadyRecorded = false, preparedMessage } = {}) {
     if (this.#signal?.aborted) return;
     const body = bodyOf(frame);
     const messageId = typeof body.msgid === 'string' ? body.msgid : '';
@@ -375,30 +570,32 @@ export class WecomHarnessBridge {
       this.#status.messagesReceived += 1;
       this.#status.lastMessageAt = new Date().toISOString();
     }
-    const text = messageText(frame);
+    const message = preparedMessage ?? wecomInboundMessage(frame, this.#client);
+    const text = message.content;
+    const hasImages = hasInboundImages(message);
     const key = conversationKey(frame);
     let streamId = null;
     let streamStarted = false;
     let sessionIdBefore = null;
     try {
-      if (!text) {
-        await this.#sendImmediate(frame, chatId, '目前支持文字、语音转写和图文混排中的文字消息。');
+      if (!text && !hasImages) {
+        await this.#sendImmediate(frame, chatId, '目前支持文字、图片和语音转写消息。');
         await this.#state.markSeen(messageId);
         return;
       }
       const command = text.toLowerCase();
-      if (command === '/help') {
+      if (!hasImages && command === '/help') {
         await this.#sendImmediate(frame, chatId, HELP_TEXT);
         await this.#state.markSeen(messageId);
         return;
       }
-      if (command === '/status') {
+      if (!hasImages && command === '/status') {
         await this.#harness.ensureRunning({ signal: this.#signal });
         await this.#sendImmediate(frame, chatId, '企业微信机器人与 DeepSeek Harness 连接正常。');
         await this.#state.markSeen(messageId);
         return;
       }
-      if (command === '/new') {
+      if (!hasImages && command === '/new') {
         await this.#state.clearSession(key);
         await this.#sendImmediate(frame, chatId, '已开启新会话。请发送你的问题。转发设置未变化；如需关闭请使用 /unwatch。');
         await this.#state.markSeen(messageId);
@@ -455,7 +652,9 @@ export class WecomHarnessBridge {
         await this.#state.markSeen(messageId);
         return;
       }
-      const workspaceCommand = await runWorkspaceCommand(text, this.#harness, key);
+      const workspaceCommand = hasImages
+        ? null
+        : await runWorkspaceCommand(text, this.#harness, key);
       if (workspaceCommand) {
         const sessionId = this.#state.sessionFor(key);
         if (sessionId) {
@@ -475,6 +674,20 @@ export class WecomHarnessBridge {
         await this.#state.markSeen(messageId);
         return;
       }
+      const compactCommand = hasImages
+        ? null
+        : await runCompactCommand(
+            text,
+            this.#harness,
+            this.#state,
+            key,
+            { signal: this.#signal },
+          );
+      if (compactCommand) {
+        await this.#sendImmediate(frame, chatId, compactCommand.message);
+        await this.#state.markSeen(messageId);
+        return;
+      }
 
       streamId = this.#generateReqId('stream');
       try {
@@ -487,16 +700,21 @@ export class WecomHarnessBridge {
       let interactionPending = false;
       sessionIdBefore = this.#state.sessionFor(key);
       if (sessionIdBefore) this.#activeAskSessions.add(sessionIdBefore);
+      const content = hasImages
+        ? await promptContentForMessage(message, { signal: this.#signal })
+        : undefined;
       const { sessionId, answer } = await askInWorkspaceSession({
         harness: this.#harness,
         state: this.#state,
         key,
         text,
+        content,
         createOptions: { signal: this.#signal },
         existsOptions: { signal: this.#signal },
         askOptions: {
           timeoutMs: this.#replyTimeoutMs,
           signal: this.#signal,
+          control: { owner: this, key },
           onUpdate: streamStarted && typeof this.#client.replyStreamNonBlocking === 'function'
             ? async (update) => {
                 if (interactionPending) return;
@@ -546,14 +764,23 @@ export class WecomHarnessBridge {
       this.#status.lastReplyAt = new Date().toISOString();
       this.#status.lastError = null;
     } catch (error) {
+      if (error?.code === 'turn-stopped') {
+        if (streamStarted && streamId) {
+          await this.#client.replyStream(frame, streamId, '已停止。', true)
+            .catch(() => undefined);
+        }
+        await this.#state.markSeen(messageId);
+        return;
+      }
       if (this.#signal?.aborted) return;
       this.#status.lastError = error?.message ?? String(error);
       this.#logger.error?.('[dsh-im:wecom] failed to process an inbound message');
+      const errorText = imagePromptUserMessage(error) ?? '消息处理失败，请稍后重试。';
       try {
         if (streamStarted && streamId) {
-          await this.#client.replyStream(frame, streamId, '消息处理失败，请稍后重试。', true);
+          await this.#client.replyStream(frame, streamId, errorText, true);
         } else {
-          await this.#sendImmediate(frame, chatId, '消息处理失败，请稍后重试。');
+          await this.#sendImmediate(frame, chatId, errorText);
         }
         await this.#state.markSeen(messageId);
       } catch {
@@ -583,9 +810,9 @@ export class WecomHarnessBridge {
     this.#status.messagesReceived += 1;
     this.#status.lastMessageAt = new Date().toISOString();
 
-    const text = nonEmptyString(messageText(frame));
+    const text = nonEmptyString(interactionReplyText(frame));
     if (!text) {
-      await this.#sendImmediate(frame, chatId, '请用文字或语音回答当前问题。')
+      await this.#sendImmediate(frame, chatId, '请用文字回答当前问题。')
         .catch(() => undefined);
       return;
     }

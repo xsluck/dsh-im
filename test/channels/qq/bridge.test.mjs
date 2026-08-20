@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { QqHarnessBridge } from '../../../src/channels/qq/qq-bridge.mjs';
+import { connectionTestTarget } from '../../../src/channels/shared/connection-test.mjs';
 
 function deferred() {
   let resolve;
@@ -51,6 +52,289 @@ function message(overrides = {}) {
   };
 }
 
+const PNG_BYTES = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+  0x00, 0x00, 0x00, 0x00,
+]);
+
+test('QQ sends image-only attachments to Harness and accepts the SDK file MIME fallback', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-image']]);
+  const prompts = [];
+  const downloads = [];
+  const sent = [];
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (_target, text) => sent.push(text) },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      sessionExists: async () => true,
+      ask: async (sessionId, content) => {
+        prompts.push({ sessionId, content });
+        return '看到图片了';
+      },
+    },
+    state: fixture.state,
+    fetchImpl: async (url, init) => {
+      downloads.push({ url: url.toString(), init });
+      return new Response(PNG_BYTES, { headers: { 'content-type': 'application/octet-stream' } });
+    },
+  });
+
+  await bridge.accept(message({
+    messageId: 'qq-image',
+    content: '',
+    attachments: [{
+      content_type: 'file',
+      filename: 'diagram.PNG',
+      size: PNG_BYTES.length,
+      url: 'https://multimedia.nt.qq.com.cn/download/opaque',
+    }],
+  }));
+
+  assert.equal(downloads.length, 1);
+  assert.equal(downloads[0].init.method, 'GET');
+  assert.equal(downloads[0].init.redirect, 'manual');
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].sessionId, 'session-image');
+  assert.deepEqual(prompts[0].content.map(({ type }) => type), ['text', 'image']);
+  assert.equal(prompts[0].content[0].text, '请分析这张图片。');
+  assert.equal(prompts[0].content[1].mediaType, 'image/png');
+  assert.equal(prompts[0].content[1].name, 'diagram.PNG');
+  assert.equal(Buffer.from(prompts[0].content[1].data, 'base64').equals(PNG_BYTES), true);
+  assert.deepEqual(sent, ['看到图片了']);
+  assert.equal(fixture.seen.has('qq-image'), true);
+});
+
+test('QQ checks sender and group mention before downloading image attachments', async () => {
+  let downloads = 0;
+  let asks = 0;
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async () => {} },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      sessionExists: async () => true,
+      ask: async () => { asks += 1; return 'unexpected'; },
+    },
+    state: stateFixture().state,
+    fetchImpl: async () => { downloads += 1; return new Response(PNG_BYTES); },
+  });
+  const attachment = {
+    content_type: 'image/png',
+    filename: 'private.png',
+    url: 'https://multimedia.nt.qq.com.cn/download/private',
+  };
+
+  await bridge.accept(message({
+    messageId: 'qq-image-other',
+    senderId: 'other-openid',
+    content: '',
+    attachments: [attachment],
+  }));
+  await bridge.accept(message({
+    kind: 'group',
+    rawEventType: 'GROUP_MESSAGE_CREATE',
+    groupOpenid: 'group-1',
+    messageId: 'qq-image-unmentioned',
+    content: '',
+    attachments: [attachment],
+    replyTarget: { scope: 'group', targetId: 'group-1', msgId: 'qq-image-unmentioned' },
+  }));
+
+  assert.equal(downloads, 0);
+  assert.equal(asks, 0);
+});
+
+test('QQ rejects non-platform image URLs without fetching and returns a retryable image error', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-image']]);
+  const sent = [];
+  let downloads = 0;
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (_target, text) => sent.push(text) },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      sessionExists: async () => true,
+      ask: async () => assert.fail('an untrusted image must not reach Harness'),
+    },
+    state: fixture.state,
+    logger: { error() {} },
+    fetchImpl: async () => { downloads += 1; return new Response(PNG_BYTES); },
+  });
+
+  await bridge.accept(message({
+    messageId: 'qq-image-untrusted',
+    content: '这是什么',
+    attachments: [{
+      content_type: 'image/png',
+      filename: 'photo.png',
+      url: 'https://attacker.example/photo.png',
+    }],
+  }));
+
+  assert.equal(downloads, 0);
+  assert.deepEqual(sent, ['图片下载失败，请重新发送后再试。']);
+  assert.equal(fixture.seen.has('qq-image-untrusted'), true);
+});
+
+test('QQ does not use an image caption as a pending Harness answer', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-question-image']]);
+  const sent = [];
+  const answered = deferred();
+  let submitted;
+  let downloads = 0;
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (_target, text) => sent.push(text) },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      sessionExists: async () => true,
+      async ask(sessionId, _text, options) {
+        await options.onInteraction({
+          kind: 'question',
+          interactionId: 'qq-question-image',
+          rpcId: 'qq-question-image',
+          sessionId,
+          payload: {
+            questions: [{
+              id: 'environment',
+              question: '请选择环境',
+              options: [{ label: '生产环境' }],
+            }],
+          },
+          async respond(result) {
+            submitted = result;
+            answered.resolve();
+            return { accepted: true };
+          },
+        });
+        await answered.promise;
+        return '已完成';
+      },
+    },
+    state: fixture.state,
+    fetchImpl: async () => { downloads += 1; return new Response(PNG_BYTES); },
+  });
+
+  const first = bridge.accept(message({ messageId: 'qq-question-start', content: '开始提问' }));
+  await eventually(() => sent.some((text) => text.includes('请选择环境')));
+  await bridge.accept(message({
+    messageId: 'qq-question-image-answer',
+    content: '生产环境',
+    attachments: [{
+      content_type: 'image/png',
+      filename: 'answer.png',
+      url: 'https://multimedia.nt.qq.com.cn/download/answer',
+    }],
+  }));
+  assert.equal(downloads, 0);
+  assert.equal(submitted, undefined);
+  assert.equal(sent.at(-1), '请用文字回答当前问题。');
+
+  await bridge.accept(message({ messageId: 'qq-question-text-answer', content: '生产环境' }));
+  await first;
+  assert.deepEqual(submitted.value.answer.answers, [{
+    id: 'environment',
+    selected: ['生产环境'],
+  }]);
+});
+
+test('QQ executes /compact for the bound Session without prompting the model', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-compact']]);
+  const sent = [];
+  const executed = [];
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (_target, text) => sent.push(text) },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      executeCommand: async (sessionId, line) => {
+        executed.push({ sessionId, line });
+        return { commandId: 'compact-qq', result: { kind: 'success', text: 'Compacted 3 history items (~900 tokens).' } };
+      },
+      ask: async () => assert.fail('/compact must not be submitted to the model'),
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message({ messageId: 'compact-qq', content: '/compact' }));
+
+  assert.deepEqual(executed, [{ sessionId: 'session-compact', line: '/compact' }]);
+  assert.deepEqual(sent, ['已压缩 3 条历史记录（约 900 个 token）。']);
+  assert.equal(fixture.seen.has('compact-qq'), true);
+});
+
+test('QQ lists models without prompting and help advertises all four commands', async () => {
+  const fixture = stateFixture();
+  const sent = [];
+  let asks = 0;
+  let creates = 0;
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (_target, text) => sent.push(text) },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      listModels: async () => ({
+        groups: [{
+          id: 'qq-provider',
+          name: 'QQ Provider',
+          models: [{ id: 'model-one', name: 'Model One' }],
+        }],
+        failures: [],
+      }),
+      createSession: async () => { creates += 1; return 'qq-session'; },
+      ask: async () => { asks += 1; return 'unexpected model reply'; },
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message({ messageId: 'models-qq', content: '/models' }));
+  assert.match(sent.at(-1), /1\. qq-provider\/model-one/);
+  assert.equal(asks, 0);
+  assert.equal(creates, 0);
+  assert.equal(fixture.sessions.size, 0);
+
+  await bridge.accept(message({ messageId: 'help-models-qq', content: '/help' }));
+  const help = sent.at(-1);
+  for (const command of ['/models', '/model', '/stop', '/steer']) {
+    assert.equal(help.includes(command), true, command);
+  }
+  assert.match(help, /\/model 2/);
+});
+
+test('QQ remembers any authorized private inbound as a connection-test target', async () => {
+  const fixture = stateFixture();
+  const sent = [];
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (target, text) => sent.push({ target, text }) },
+    ownerUserOpenid: 'owner-openid',
+    harness: { ensureRunning: async () => true },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message({
+    messageId: 'help-rejected',
+    senderId: 'other-openid',
+    content: '/help',
+    replyTarget: { scope: 'c2c', targetId: 'other-openid', msgId: 'help-rejected' },
+  }));
+  await bridge.accept(message({
+    kind: 'group',
+    rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+    groupOpenid: 'group-1',
+    messageId: 'help-group',
+    content: '/help',
+    replyTarget: { scope: 'group', targetId: 'group-1', msgId: 'help-group' },
+  }));
+  assert.equal(connectionTestTarget(fixture.state), null);
+
+  const privateTarget = {
+    scope: 'c2c', targetId: 'owner-openid', msgId: 'help-private',
+  };
+  await bridge.accept(message({
+    messageId: 'help-private',
+    content: '/help',
+    replyTarget: privateTarget,
+  }));
+
+  assert.deepEqual(connectionTestTarget(fixture.state), privateTarget);
+  assert.equal(sent.length, 2);
+});
+
 test('QQ private messages stream Harness snapshots and finalize once', async () => {
   const frames = [];
   const sent = [];
@@ -88,6 +372,80 @@ test('QQ private messages stream Harness snapshots and finalize once', async () 
   assert.deepEqual(sent, []);
   assert.equal(seen.has('msg-1'), true);
   assert.equal(bridge.status.messagesReplied, 1);
+});
+
+test('QQ closes an opened progress stream and announces when the Harness turn is stopped', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-stopped']]);
+  const frames = [];
+  const sent = [];
+  let cancellations = 0;
+  let loggedErrors = 0;
+  const bridge = new QqHarnessBridge({
+    bot: {
+      sendText: async (_target, text) => sent.push(text),
+      openStream: () => ({
+        update: async (text) => frames.push(text),
+        complete: async () => frames.push('DONE'),
+        cancel: () => { cancellations += 1; },
+      }),
+    },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_sessionId, _text, { onUpdate }) => {
+        await onUpdate({ type: 'tool', name: 'bash' });
+        const error = new Error('turn stopped');
+        error.code = 'turn-stopped';
+        throw error;
+      },
+    },
+    state: fixture.state,
+    logger: { warn() {}, error() { loggedErrors += 1; } },
+  });
+
+  await bridge.accept(message({ messageId: 'qq-stopped-stream' }));
+
+  assert.deepEqual(frames, ['正在使用bash…']);
+  assert.equal(cancellations, 1);
+  assert.deepEqual(sent, ['已停止。']);
+  assert.equal(loggedErrors, 0);
+  assert.equal(fixture.seen.has('qq-stopped-stream'), true);
+});
+
+test('QQ keeps a stopped turn terminal when stream cleanup and its notice both fail', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-stopped-fallback']]);
+  let warnings = 0;
+  let loggedErrors = 0;
+  const bridge = new QqHarnessBridge({
+    bot: {
+      sendText: async () => { throw new Error('send unavailable'); },
+      openStream: () => ({
+        update: async () => {},
+        complete: async () => {},
+        cancel: () => { throw new Error('cancel unavailable'); },
+      }),
+    },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      sessionExists: async () => true,
+      ask: async () => {
+        const error = new Error('turn stopped');
+        error.code = 'turn-stopped';
+        throw error;
+      },
+    },
+    state: fixture.state,
+    logger: {
+      warn() { warnings += 1; },
+      error() { loggedErrors += 1; },
+    },
+  });
+
+  await bridge.accept(message({ messageId: 'qq-stopped-stream-fallback' }));
+
+  assert.equal(warnings, 2);
+  assert.equal(loggedErrors, 0);
+  assert.equal(fixture.seen.has('qq-stopped-stream-fallback'), true);
 });
 
 test('QQ bridge accepts only the scanner and requires an at-message event in groups', async () => {

@@ -15,6 +15,8 @@ import {
   observeBotWorkspaceRemovals,
 } from '../../../../src/channels/shared/bot-workspace-store.mjs';
 import { createConnectionSupervisor } from './connection-supervisor.mjs';
+import { createHarnessCommandExecutor } from '../../harness-command-executor.mjs';
+import { createHarnessSessionExecutors } from '../../harness-session-coordinator.mjs';
 
 function harnessOrigin(webServer, configured) {
   if (configured !== undefined) return new URL(configured);
@@ -73,12 +75,20 @@ export async function createProductionController(ctx, config = {}, internals = {
     }
     return state;
   };
+  const commandExecutor = createHarnessCommandExecutor(ctx, internals.commandExecutor);
+  const { controlExecutor, sessionMaintenanceExecutor } = createHarnessSessionExecutors(ctx, {
+    controlExecutor: internals.controlExecutor,
+    sessionMaintenanceExecutor: internals.sessionMaintenanceExecutor,
+  });
   const harness = new Harness({
     baseUrl: harnessOrigin(ctx.webServer, config.harnessBaseUrl),
     workspace: defaultWorkspace,
-    agentPreset: config.agentPreset ?? 'standard',
+    ...(config.agentPreset == null ? {} : { agentPreset: config.agentPreset }),
     autostart: false,
     dshBin: config.dshBin ?? 'dsh',
+    ...(commandExecutor ? { commandExecutor } : {}),
+    ...(controlExecutor ? { controlExecutor } : {}),
+    ...(sessionMaintenanceExecutor ? { sessionMaintenanceExecutor } : {}),
   });
   const coreController = new Controller({
     qrAuth,

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createWeixinBridgeStatus, WeixinHarnessBridge } from '../../../src/channels/weixin/weixin-bridge.mjs';
+import { connectionTestTarget } from '../../../src/channels/shared/connection-test.mjs';
 
 function deferred() {
   let resolve;
@@ -62,6 +63,196 @@ function stateFixture() {
     },
   };
 }
+
+const PNG_BYTES = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+  0x01, 0x02, 0x03,
+]);
+
+test('Weixin remembers any authorized private inbound as a connection-test target', async () => {
+  const fixture = stateFixture();
+  const sent = [];
+  const bridge = new WeixinHarnessBridge({
+    api: { sendText: async (request) => sent.push(request) },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    harness: { ensureRunning: async () => true },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message('help-owner', '/help'));
+  assert.deepEqual(connectionTestTarget(fixture.state), { toUserId: 'owner-user' });
+  assert.match(sent.at(-1).text, /\/help/);
+
+  const rejectedFixture = stateFixture();
+  const rejectedBridge = new WeixinHarnessBridge({
+    api: { sendText: async () => assert.fail('unauthorized message must not be answered') },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    harness: { ensureRunning: async () => true },
+    state: rejectedFixture.state,
+  });
+  await rejectedBridge.accept(message('help-other', '/help', { from_user_id: 'other-user' }));
+  assert.equal(connectionTestTarget(rejectedFixture.state), null);
+});
+
+test('Weixin sends image-only messages to Harness as structured content', async () => {
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:owner-user', 'session-image');
+  const prompts = [];
+  const sent = [];
+  const bridge = new WeixinHarnessBridge({
+    api: {
+      inboundImages: () => [{ name: 'image', data: PNG_BYTES }],
+      sendText: async (request) => sent.push(request),
+    },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    harness: {
+      sessionExists: async () => true,
+      ask: async (sessionId, content) => {
+        prompts.push({ sessionId, content });
+        return '微信图片已识别';
+      },
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message('weixin-image', '', {
+    item_list: [{ type: 2, image_item: { media: {} } }],
+  }));
+
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].sessionId, 'session-image');
+  assert.deepEqual(prompts[0].content.map(({ type }) => type), ['text', 'image']);
+  assert.equal(prompts[0].content[0].text, '请分析这张图片。');
+  assert.equal(prompts[0].content[1].mediaType, 'image/png');
+  assert.equal(Buffer.from(prompts[0].content[1].data, 'base64').equals(PNG_BYTES), true);
+  assert.equal(sent.at(-1).text, '微信图片已识别');
+  assert.equal(sent.at(-1).contextToken, 'context-weixin-image');
+  assert.equal(fixture.seen.has('weixin-image'), true);
+});
+
+test('Weixin authorizes the sender before resolving encrypted image references', async () => {
+  let imageExtractions = 0;
+  let asks = 0;
+  const bridge = new WeixinHarnessBridge({
+    api: {
+      inboundImages: () => { imageExtractions += 1; return [{ data: PNG_BYTES }]; },
+      sendText: async () => assert.fail('an unauthorized sender must not receive a reply'),
+    },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    harness: { ask: async () => { asks += 1; return 'unexpected'; } },
+    state: stateFixture().state,
+  });
+
+  await bridge.accept(message('weixin-image-other', '', {
+    from_user_id: 'other-user',
+    item_list: [{ type: 2, image_item: { media: {} } }],
+  }));
+
+  assert.equal(imageExtractions, 0);
+  assert.equal(asks, 0);
+});
+
+test('Weixin returns a specific retry message when encrypted image loading fails', async () => {
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:owner-user', 'session-image');
+  const sent = [];
+  const bridge = new WeixinHarnessBridge({
+    api: {
+      inboundImages: () => [{ load: async () => { throw new Error('CDN unavailable'); } }],
+      sendText: async (request) => sent.push(request),
+    },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    harness: {
+      sessionExists: async () => true,
+      ask: async () => assert.fail('a failed image must not reach Harness'),
+    },
+    state: fixture.state,
+    logger: { error() {} },
+  });
+
+  await bridge.accept(message('weixin-image-error', '', {
+    item_list: [{ type: 2, image_item: { media: {} } }],
+  }));
+
+  assert.equal(sent.at(-1).text, '图片下载失败，请重新发送后再试。');
+  assert.equal(fixture.seen.has('weixin-image-error'), true);
+});
+
+test('Weixin executes /compact for the bound Session without prompting the model', async () => {
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:owner-user', 'session-compact');
+  const sent = [];
+  const executed = [];
+  const bridge = new WeixinHarnessBridge({
+    api: { sendText: async (request) => sent.push(request) },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    harness: {
+      executeCommand: async (sessionId, line) => {
+        executed.push({ sessionId, line });
+        return { commandId: 'compact-weixin', result: { kind: 'success', text: 'No compactable history yet.' } };
+      },
+      ask: async () => assert.fail('/compact must not be submitted to the model'),
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message('compact-weixin', '/compact'));
+
+  assert.deepEqual(executed, [{ sessionId: 'session-compact', line: '/compact' }]);
+  assert.equal(sent.at(-1).text, '暂无可压缩的历史记录。');
+  assert.equal(fixture.seen.has('compact-weixin'), true);
+});
+
+test('Weixin lists models without prompting and help advertises all four commands', async () => {
+  const fixture = stateFixture();
+  const sent = [];
+  let asks = 0;
+  let creates = 0;
+  const bridge = new WeixinHarnessBridge({
+    api: { sendText: async (request) => sent.push(request) },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    harness: {
+      listModels: async () => ({
+        groups: [{
+          id: 'weixin-provider',
+          name: 'Weixin Provider',
+          models: [{ id: 'model-one', name: 'Model One' }],
+        }],
+        failures: [],
+      }),
+      createSession: async () => { creates += 1; return 'weixin-session'; },
+      ask: async () => { asks += 1; return 'unexpected model reply'; },
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message('models-weixin', '/models'));
+  assert.match(sent.at(-1).text, /1\. weixin-provider\/model-one/);
+  assert.equal(asks, 0);
+  assert.equal(creates, 0);
+  assert.equal(fixture.sessions.size, 0);
+
+  await bridge.accept(message('help-models-weixin', '/help'));
+  const help = sent.at(-1).text;
+  for (const command of ['/models', '/model', '/stop', '/steer']) {
+    assert.equal(help.includes(command), true, command);
+  }
+  assert.match(help, /\/model 2/);
+});
 
 test('bridge maps the scanning Weixin user to one persistent Harness session and echoes context_token', async () => {
   const sent = [];
@@ -509,7 +700,10 @@ test('Weixin serializes an invalid pending reply before the following valid answ
   await eventually(() => sent.some(({ text }) => text.includes('请给出有效文字答案')));
   const invalid = bridge.accept(message('invalid-image', '', {
     message_type: 3,
-    item_list: [{ type: 2 }],
+    item_list: [
+      { type: 1, text_item: { text: '伪装成答案的图片说明' } },
+      { type: 2, image_item: { media: {} } },
+    ],
   }));
   await invalidNoticeStarted.promise;
   const valid = bridge.accept(message('invalid-valid', '真正的答案'));

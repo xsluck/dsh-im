@@ -13,11 +13,18 @@ import {
   validateWorkspacePath,
 } from '../src/channels/shared/bot-workspace-store.mjs';
 import {
+  connectionTestTarget,
+  rememberConnectionTestTarget,
+} from '../src/channels/shared/connection-test.mjs';
+import {
   runWorkspaceCommand,
   splitWorkspaceCommandMessage,
 } from '../src/channels/shared/workspace-command.mjs';
 import { TextHarnessBridge } from '../src/channels/shared/text-harness-bridge.mjs';
-import { askInWorkspaceSession } from '../src/channels/shared/workspace-session.mjs';
+import {
+  askInWorkspaceSession,
+  WORKSPACE_SESSION_STALE,
+} from '../src/channels/shared/workspace-session.mjs';
 import { HarnessClient as WeixinHarnessClient } from '../src/channels/weixin/harness-client.mjs';
 import { HarnessClient as FeishuHarnessClient } from '../src/channels/feishu/harness-client.mjs';
 import { HarnessClient as DingtalkHarnessClient } from '../src/channels/dingtalk/harness-client.mjs';
@@ -68,6 +75,23 @@ test('BotWorkspaceStore uses process.cwd() when a bot has no configured workspac
   const { root } = await fixture(t);
   const store = await new BotWorkspaceStore(join(root, 'cwd-workspaces.json')).load();
   assert.equal(await store.ensure('bot_cwd'), process.cwd());
+});
+
+test('connection test targets survive a new workspace scope for the same bot', async (t) => {
+  const { path, defaultWorkspace } = await fixture(t);
+  const workspaces = await new BotWorkspaceStore(path, { defaultWorkspace }).load();
+  await workspaces.ensure('bot_reconnect');
+  const state = {};
+  const harness = {};
+  const beforeReconnect = createBotWorkspaceScope(harness, {
+    botId: 'bot_reconnect', workspaces, state,
+  });
+  const afterReconnect = createBotWorkspaceScope(harness, {
+    botId: 'bot_reconnect', workspaces, state,
+  });
+
+  assert.equal(rememberConnectionTestTarget(beforeReconnect.state, { channelId: 'D123' }), true);
+  assert.deepEqual(connectionTestTarget(afterReconnect.state), { channelId: 'D123' });
 });
 
 test('workspace writes roll back updates while committed removals stay retired in memory', async (t) => {
@@ -182,6 +206,69 @@ test('an old session cannot be written back while RPC switches the bot workspace
   finishCreation('second-session-from-old-workspace');
   assert.equal(await scope.harness.sessionExists(await oldSessionForLookup), false);
   assert.equal(existenceChecks, 0, 'stale sessions are rejected before asking Harness');
+});
+
+test('an old workspace session handle cannot list, select, stop, or steer after a switch', async (t) => {
+  const { path, defaultWorkspace, alternateWorkspace } = await fixture(t);
+  const workspaces = await new BotWorkspaceStore(path, { defaultWorkspace }).load();
+  await workspaces.ensure('bot_session_controls');
+  const targetCalls = [];
+  const harness = {
+    async getSessionModels(...args) { targetCalls.push(['models', ...args]); },
+    async selectSessionModel(...args) { targetCalls.push(['select', ...args]); },
+    async stopActiveTurn(...args) { targetCalls.push(['stop', ...args]); },
+    async steerActiveTurn(...args) { targetCalls.push(['steer', ...args]); },
+  };
+  const state = { async clearSessions() {} };
+  const scope = createBotWorkspaceScope(harness, {
+    botId: 'bot_session_controls', workspaces, state,
+  });
+  const oldSession = scope.harness.workspaceSession('session-old');
+  const controller = createWorkspaceAwareController({
+    status() { return { bots: [{ botId: 'bot_session_controls' }] }; },
+  }, { workspaces, stateFor: async () => state });
+
+  await controller.updateWorkspace('bot_session_controls', alternateWorkspace);
+  const control = { owner: {}, key: 'direct:one' };
+  for (const operation of [
+    () => oldSession.models(),
+    () => oldSession.selectModel({ provider: 'provider', model: 'model' }),
+    () => oldSession.stopActiveTurn(control),
+    () => oldSession.steerActiveTurn('continue', control),
+  ]) {
+    await assert.rejects(operation(), (error) => error?.code === WORKSPACE_SESSION_STALE);
+  }
+  assert.deepEqual(targetCalls, []);
+});
+
+test('a control mutation that already started keeps its result across a workspace switch', async (t) => {
+  const { path, defaultWorkspace, alternateWorkspace } = await fixture(t);
+  const workspaces = await new BotWorkspaceStore(path, { defaultWorkspace }).load();
+  await workspaces.ensure('bot_started_controls');
+  const started = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const harness = {
+    async stopActiveTurn() { started.push('stop'); await gate; return true; },
+    async steerActiveTurn() { started.push('steer'); await gate; return true; },
+  };
+  const state = { async clearSessions() {} };
+  const scope = createBotWorkspaceScope(harness, {
+    botId: 'bot_started_controls', workspaces, state,
+  });
+  const session = scope.harness.workspaceSession('session-old');
+  const control = { owner: {}, key: 'direct:one' };
+  const stop = session.stopActiveTurn(control);
+  const steer = session.steerActiveTurn('continue', control);
+  assert.deepEqual(started, ['stop', 'steer']);
+
+  const controller = createWorkspaceAwareController({
+    status() { return { bots: [{ botId: 'bot_started_controls' }] }; },
+  }, { workspaces, stateFor: async () => state });
+  await controller.updateWorkspace('bot_started_controls', alternateWorkspace);
+  release();
+
+  assert.deepEqual(await Promise.all([stop, steer]), [true, true]);
 });
 
 test('a prompt retries in the new workspace when switching after session creation', async (t) => {
@@ -907,11 +994,14 @@ test('/sessionlist supports the current workspace, list numbers, and absolute pa
   assert.doesNotMatch(current.message, /\u202e|\n4\. injected/);
   assert.match(current.message, /2\. 暂无标题（已归档）\n   ID: session-archived/);
   assert.match(current.message, /3\. 标题暂不可用\n   ID: session-missing-summary/);
+  assert.match(current.message, /绑定用法：\/session Session ID 或当前工作区序号（\/session N）/);
   assert.equal(current.messages.join(''), current.message);
 
   const numbered = await runWorkspaceCommand('/sessionlist 2', harness);
   assert.match(numbered.message, new RegExp(`工作区：${alternateWorkspace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.match(numbered.message, /Alternate session/);
+  assert.match(numbered.message, /绑定用法：\/session Session ID\n提示：\/session N 只按机器人当前工作区的序号绑定/);
+  assert.doesNotMatch(numbered.message, /Session ID 或当前工作区序号/);
 
   const absolute = await runWorkspaceCommand(`/sessionlist ${thirdWorkspace}`, harness);
   assert.match(absolute.message, /该工作区暂无会话/);

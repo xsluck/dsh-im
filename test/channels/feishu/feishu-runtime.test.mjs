@@ -1,12 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { FeishuRuntime } from '../../../src/channels/feishu/feishu-runtime.mjs';
+import { rememberConnectionTestTarget } from '../../../src/channels/shared/connection-test.mjs';
 
 class FakeClient {
   static instances = [];
+  static sent = [];
 
   constructor(options) {
     this.options = options;
+    this.im = {
+      v1: {
+        message: {
+          create: async (payload) => {
+            FakeClient.sent.push(payload);
+            return { code: 0, data: { message_id: `message-${FakeClient.sent.length}` } };
+          },
+        },
+      },
+    };
     FakeClient.instances.push(this);
   }
 }
@@ -48,6 +60,7 @@ class FakeWSClient {
 function fakeLark() {
   FakeWSClient.instances.length = 0;
   FakeClient.instances.length = 0;
+  FakeClient.sent.length = 0;
   return {
     Domain: { Feishu: 'feishu-domain', Lark: 'lark-domain' },
     LoggerLevel: { info: 'info' },
@@ -74,7 +87,7 @@ test('FeishuRuntime becomes chat-ready only after Harness and Feishu are connect
     lark: fakeLark(),
     appId: 'cli_test',
     appSecret: 'secret',
-    ownerOpenId: 'ou_owner',
+    ownerOpenIds: ['*', 'ou_owner'],
     harness: {
       async ensureRunning(options) {
         harnessChecks += 1;
@@ -104,11 +117,55 @@ test('FeishuRuntime becomes chat-ready only after Harness and Feishu are connect
     url: 'https://open.feishu.cn/test',
   })).timeout, 15_000);
 
+  assert.deepEqual(await runtime.sendConnectionTest('连接测试'), { sent: true });
+  assert.deepEqual(FakeClient.sent, [{
+    params: { receive_id_type: 'open_id' },
+    data: {
+      receive_id: 'ou_owner',
+      msg_type: 'text',
+      content: JSON.stringify({ text: '连接测试' }),
+    },
+  }]);
+
   const stopped = await runtime.stop();
   assert.equal(stopped.ready, false);
   assert.equal(stopped.feishuLongConnectionState, 'idle');
   assert.equal(FakeWSClient.instances[0].state, 'closed');
   assert.equal(harnessSignal.aborted, true);
+});
+
+test('FeishuRuntime uses a remembered private target for wildcard-only manual bots', async () => {
+  const state = { hasSeen: () => false };
+  const runtime = new FeishuRuntime({
+    lark: fakeLark(),
+    appId: 'cli_manual',
+    appSecret: 'secret',
+    ownerOpenIds: ['*'],
+    harness: { async ensureRunning() {} },
+    state,
+  });
+
+  const starting = runtime.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  FakeWSClient.instances[0].becomeReady();
+  await starting;
+
+  await assert.rejects(
+    runtime.sendConnectionTest('连接测试'),
+    (error) => error?.code === 'test-target-unavailable',
+  );
+  rememberConnectionTestTarget(state, { chatId: 'oc_manual_private' });
+  assert.deepEqual(await runtime.sendConnectionTest('连接测试'), { sent: true });
+  assert.deepEqual(FakeClient.sent, [{
+    params: { receive_id_type: 'chat_id' },
+    data: {
+      receive_id: 'oc_manual_private',
+      msg_type: 'text',
+      content: JSON.stringify({ text: '连接测试' }),
+    },
+  }]);
+
+  await runtime.stop();
 });
 
 test('FeishuRuntime fails closed when the initial WebSocket handshake times out', async () => {

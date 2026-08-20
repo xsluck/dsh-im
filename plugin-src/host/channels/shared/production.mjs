@@ -3,6 +3,8 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { createTokenConnectionSupervisor } from './connection-supervisor.mjs';
+import { createHarnessCommandExecutor } from '../../harness-command-executor.mjs';
+import { createHarnessSessionExecutors } from '../../harness-session-coordinator.mjs';
 import {
   BotWorkspaceStore,
   createBotWorkspaceScope,
@@ -64,12 +66,20 @@ export async function createTokenProductionController(ctx, config, internals, de
     }
     return state;
   };
+  const commandExecutor = createHarnessCommandExecutor(ctx, internals.commandExecutor);
+  const { controlExecutor, sessionMaintenanceExecutor } = createHarnessSessionExecutors(ctx, {
+    controlExecutor: internals.controlExecutor,
+    sessionMaintenanceExecutor: internals.sessionMaintenanceExecutor,
+  });
   const harness = new ResolvedHarness({
     baseUrl: harnessOrigin(ctx.webServer, config.harnessBaseUrl),
     workspace: defaultWorkspace,
-    agentPreset: config.agentPreset ?? 'standard',
+    ...(config.agentPreset == null ? {} : { agentPreset: config.agentPreset }),
     autostart: false,
     dshBin: config.dshBin ?? 'dsh',
+    ...(commandExecutor ? { commandExecutor } : {}),
+    ...(controlExecutor ? { controlExecutor } : {}),
+    ...(sessionMaintenanceExecutor ? { sessionMaintenanceExecutor } : {}),
   });
   const coreController = new ResolvedController({
     credentials: ctx.credentials,

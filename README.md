@@ -1,17 +1,44 @@
-# dsh-im
-
 <p align="center">
-  <img src="assets/logo.png" alt="dsh-im logo" width="160">
+  <img src="assets/logo-dsh-im-connecting-readme-3x2.png" alt="DSH-IM — Connecting DeepSeek Harness" width="420" height="280" align="middle">&nbsp;&nbsp;
+  <img src="assets/logo-plugin-phone.png" alt="DSH-IM phone logo" width="280" height="280" align="middle">
 </p>
 
-<p align="center"><strong>让聊天机器人轻松接入 DeepSeek Harness</strong></p>
-<p align="center"><strong>Connect IM bots to DeepSeek Harness with ease</strong></p>
+---
 
-## 中文
+<div align="center">
+  <p><strong>让 DeepSeek Harness 触手可及</strong></p>
+  <p><strong>Connecting DeepSeek Harness</strong></p>
 
-通过扫码、App Manifest 或已有机器人凭据把 IM 机器人接入 DeepSeek Harness。一个插件、一个设置入口，统一管理飞书、微信、钉钉、企业微信、QQ、Slack、Telegram、Discord 和 WhatsApp 机器人。
+  <p>
+    <img src="https://dsh-im-random-badge.xmanrui-dsh-im.workers.dev" alt="滑动变祖器：今天是梁子或今天是梁圣（随机）">
+    <a href="LICENSE"><img src="https://img.shields.io/github/license/xmanrui/dsh-im" alt="MIT 许可证"></a>
+    <img src="https://img.shields.io/badge/agent-DeepSeek%20Harness-5865f2" alt="DeepSeek Harness">
+    <a href="https://dshfind.com/zh/plugins/xmanrui/dsh-im?ref=badge"><img src="https://dshfind.com/api/badge/xmanrui/dsh-im?lang=zh" alt="dshfind"></a>
+    <a href="https://dshfind.com/zh/plugins/xmanrui/dsh-im"><img src="https://img.shields.io/badge/dshfind-%E5%88%86%E7%B1%BB%E7%AC%AC%E4%B8%80-d97706" alt="dshfind: 分类第一"></a>
+  </p>
 
-Connect IM bots to DeepSeek Harness by scanning a QR code, using an App Manifest, or entering existing bot credentials. One plugin and one settings entry provide unified management for Feishu, WeChat, DingTalk, WeCom, QQ, Slack, Telegram, Discord, and WhatsApp bots.
+  <p>
+    <img src="https://img.shields.io/badge/%E5%BE%AE%E4%BF%A1-07C160?logo=wechat&amp;logoColor=white" alt="微信">
+    <img src="https://img.shields.io/badge/%E9%A3%9E%E4%B9%A6-3370FF?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTcuMiA0LjVoNy42YzEuMiAwIDIuMS41NSAyLjcgMS41OCAxLjA1IDEuOCAxLjU1IDMuNDUgMS41OCA0Ljk1LTIuMDQtLjYyLTQuMi0uMTUtNi4yMiAxLjQ1QzExLjMgOS43IDkuNDIgNy4wNCA3LjIgNC41WiIvPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik0xMC44IDEzLjU1YzMuMy0yLjkzIDUuNzItNC4yNCA5LjQ3LTIuNTItMS4yIDEuNDUtMi4yNyA0LjE4LTMuODYgNS40My0xLjY3IDEuMzEtMy45LjUtNS42MS0uNjR2LTIuMjdaIi8%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTQuNCA4LjM1YzMuNDcgMy42MSA3LjI1IDYuMSAxMC4zMyA1LjcgMS4wNi0uMTQgMi4yLS43MiAzLjQtMS43Mi0xLjA0IDIuNjUtMi42IDQuOC01LjA2IDYtMi40NiAxLjItNS41Ni41Mi03LjQyLS43MkEyLjc2IDIuNzYgMCAwIDEgNC40IDE1LjNWOC4zNVoiLz48L3N2Zz4%3D" alt="飞书">
+    <img src="https://img.shields.io/badge/%E9%92%89%E9%92%89-1677FF?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0OCA0OCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTM3LjA1IDIyLjc4M2MtNi43NTgtNS4yMTYtMTQuMzc4LTEyLjEyOC0yMi43My0xOS41MzgtLjY1NS0uNTg1LTEuMjQyLS4zNTQtMS41MzYuNDItMS44OCA0Ljk3My0uMDU4IDkuMzg2IDIuODg5IDExLjkzMnM3LjM2OCA0LjkxMiAxMC4wNTggNi4xNTVjLjEwNS4wNDkuMDEzLjIwMy0uMDkzLjE2My00Ljk1My0yLjE4Mi04LjM5Ny0zLjc2NS0xMy4wNy03LjM2OC0uNDk3LS4zODgtMS4wMS0uMjQyLTEuMDcuNTIxLS4zODQgNC43NDggMi42NTcgOC40ODMgNi4wNTggOS43NDUgMi4xLjc4MSA0LjM5OCAxLjIxMiA2LjUzIDEuNDc0LjEwOS4wMTUuMDg0LjE3OC0uMDI3LjE3OC0yLjc0Ny4wMS02LjA1OC0uNjU0LTguOTM1LTEuNzUxLS42MDYtLjIzMy0uODE4LjI1LS43MjIuNjMzLjQ5MSAyLjAwOCAyLjk3NCA1LjA3NiA2LjkyNiA1LjczYTEyIDEyIDAgMCAwIDIuMjI4LjExNWMuMTY0IDAgLjIwOC4wODkuMTU0LjIxN3EtMi42ODUgNC42LTIuODAzIDQuNzk3Yy0uMDkxLjE1Mi0uMDM2LjI3NS4xNTYuMjc1aDMuNTQzYy4xNjQgMCAuMjY0LjEwNi4xOC4yNDZsLTQuOTU4IDguMTk2Yy0uMTkxLjMyOC4wMzUuNTY1LjM5NS4zMDFzMTUuMjEyLTExLjEzMyAxNS42MzYtMTEuNDQ4Yy4xOTUtLjE0Mi4xNDgtLjMyNy0uMTI0LS4zMjdoLTMuMThjLS4yMDYgMC0uMjUyLS4xNC0uMTExLS4yOC4xNC0uMTQxIDMuNjAyLTMuNTk0IDQuODM3LTQuODg4IDEuMjgzLTEuMzUgMS45MzgtMy44MjUtLjIzMS01LjQ5OCIvPjwvc3ZnPg%3D%3D" alt="钉钉">
+    <img src="https://img.shields.io/badge/%E4%BC%81%E4%B8%9A%E5%BE%AE%E4%BF%A1-3370FF?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjIuMzUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIgZD0iTTE3LjcgMTQuNWMxLjA1LTEuMTIgMS42NS0yLjUyIDEuNjUtNC4wMyAwLTMuODItMy41OC02LjkyLTgtNi45MnMtOCAzLjEtOCA2LjkyIDMuNTggNi45MiA4IDYuOTJjMS4xNyAwIDIuMjgtLjIyIDMuMjgtLjYyIi8%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTE2LjEgMTUuMTVjLjctLjcgMS44My0uNyAyLjUzIDBzLjcgMS44MyAwIDIuNTMtMS44My43LTIuNTMgMC0uNy0xLjgzIDAtMi41M1pNMTkuMjUgMTMuNDVhMS4zNiAxLjM2IDAgMSAxIDEuOTIgMS45MiAxLjM2IDEuMzYgMCAwIDEtMS45Mi0xLjkyWk0xOS41NSAxOC4wNWExLjE2IDEuMTYgMCAxIDEgMS42NCAxLjY0IDEuMTYgMS4xNiAwIDAgMS0xLjY0LTEuNjRaTTE1LjI1IDE4Ljc1YS45Mi45MiAwIDEgMSAxLjMgMS4zLjkyLjkyIDAgMCAxLTEuMy0xLjNaIi8%2BPC9zdmc%2B" alt="企业微信">
+    <img src="https://img.shields.io/badge/QQ-1EBAFC?logo=qq&amp;logoColor=white" alt="QQ">
+    <img src="https://img.shields.io/badge/Slack-4A154B?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTYgMTVhMiAyIDAgMSAxLTItMmgydjJabTEgMGEyIDIgMCAxIDEgNCAwdjVhMiAyIDAgMSAxLTQgMHYtNVptMi04YTIgMiAwIDEgMSAyLTJ2Mkg5Wm0wIDFhMiAyIDAgMSAxIDAgNEg0YTIgMiAwIDEgMSAwLTRoNVptOCAyYTIgMiAwIDEgMSAyIDJoLTJ2LTJabS0xIDBhMiAyIDAgMSAxLTQgMFY1YTIgMiAwIDEgMSA0IDB2NVptLTIgOGEyIDIgMCAxIDEtMiAydi0yaDJabTAtMWEyIDIgMCAxIDEgMC00aDVhMiAyIDAgMSAxIDAgNGgtNVoiLz48L3N2Zz4%3D" alt="Slack">
+    <img src="https://img.shields.io/badge/Telegram-26A5E4?logo=telegram&amp;logoColor=white" alt="Telegram">
+    <img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&amp;logoColor=white" alt="Discord">
+    <img src="https://img.shields.io/badge/WhatsApp-25D366?logo=whatsapp&amp;logoColor=white" alt="WhatsApp">
+  </p>
+
+  <p><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
+</div>
+
+---
+
+## 简介
+
+通过扫码、App Manifest 或已有机器人凭据把 IM 机器人接入 DeepSeek Harness。一个插件、一个设置入口，统一管理飞书、微信、钉钉、企业微信、QQ、Slack、Telegram、Discord 和 WhatsApp。**每个渠道都支持接入多个机器人**，各机器人的连接状态、工作区和会话绑定彼此独立。支持切换工作区和重新绑定会话。
+
+Connect IM bots to DeepSeek Harness by scanning a QR code, using an App Manifest, or entering existing bot credentials. One plugin and one settings entry provide unified management for Feishu, WeChat, DingTalk, WeCom, QQ, Slack, Telegram, Discord, and WhatsApp. **Every channel supports multiple bots**, each with independent connection state, workspace, and session bindings. It also supports switching workspaces and rebinding sessions.
 
 ## 界面
 
@@ -19,65 +46,80 @@ Connect IM bots to DeepSeek Harness by scanning a QR code, using an App Manifest
 
 ## 当前内置渠道
 
-- 飞书：扫码创建机器人，或使用已有 App ID + App Secret 绑定机器人，使用长连接收发消息；
-- 微信：扫码绑定微信机器人，使用腾讯 iLink 长轮询收发消息；
-- 钉钉：扫码创建机器人，或使用已有 Client ID + Client Secret 绑定机器人，使用钉钉 Stream 长连接收消息，并通过 AI Card 流式显示 Harness 回答。
-- 企业微信：使用企业微信 App 扫码创建智能机器人，或使用已有 Bot ID + Secret 绑定机器人，通过官方 WebSocket 长连接收消息，原生显示“正在思考中”、工具执行进度和流式回答。
-- QQ：使用手机 QQ 扫码创建机器人，或使用已有 AppID + AppSecret 绑定机器人，通过 WebSocket 长连接收消息；私聊支持原生“正在输入”和流式回答，群聊在机器人被 @ 后回复。
-- Slack：使用预置 App Manifest 辅助创建并配置应用，再填写 Bot Token（`xoxb-`）与 App Token（`xapp-`），通过 Socket Mode 长连接收消息；私聊直接回复，频道仅在机器人被 @ 时响应，并优先使用 Slack 官方流式消息 API 显示 Harness 回答。
-- Telegram：使用 @BotFather 生成的 Bot Token 接入机器人，通过官方 Bot API 长轮询收消息；私聊直接回复，群聊仅在机器人被提及或收到对机器人消息的回复时响应，并通过编辑消息流式显示 Harness 回答。
-- Discord：使用 Developer Portal 生成的 Bot Token 接入机器人，通过 Gateway v10 长连接收消息；私信直接回复，服务器频道仅在机器人被提及时响应，并通过编辑消息流式显示 Harness 回答。
-- WhatsApp：使用手机 WhatsApp 扫码关联设备，通过 WhatsApp Web 长连接收消息；收到消息后显示已读和“正在输入”，再发送 Harness 的最终回答。
-
-所有渠道都支持 Harness 审批：当 Harness 需要审批时，机器人会把审批提示直接发给会话里的用户，用户回复“同意”“批准”“yes”等即可继续，回复“拒绝”“no”等则终止该次工具调用；审批提示会跟随用户消息的语言显示中文或英文。
+| 渠道 | 接入方式 | 消息与回复 |
+| --- | --- | --- |
+| 飞书 | 扫码创建机器人，或使用 App ID + App Secret 手动绑定 | 长连接接收消息；通过飞书流式卡片显示思考、工具进度和回答 |
+| 微信 | 使用微信扫码绑定机器人 | 腾讯 iLink 长轮询收发消息 |
+| 钉钉 | 扫码创建机器人，或使用 Client ID + Client Secret 手动绑定 | 钉钉 Stream 长连接；通过 AI Card 流式显示回答 |
+| 企业微信 | 使用企业微信 App 扫码创建智能机器人，或使用 Bot ID + Secret 手动绑定 | 官方 WebSocket 长连接；原生显示“正在思考中”、工具执行进度和流式回答 |
+| QQ | 使用手机 QQ 扫码创建机器人，或使用 AppID + AppSecret 手动绑定 | WebSocket 长连接；私聊显示“正在输入”和流式回答，群聊被 @ 后回复 |
+| Slack | 使用预置 App Manifest 创建应用，再填写 Bot Token（`xoxb-`）和 App Token（`xapp-`） | Socket Mode 长连接；私聊直接回复，频道被 @ 后响应，优先使用官方流式消息 API |
+| Telegram | 使用 @BotFather 生成的 Bot Token | Bot API 长轮询；私聊直接回复，群聊被提及或收到对机器人消息的回复时响应，通过编辑消息流式显示回答 |
+| Discord | 使用 Developer Portal 生成的 Bot Token | Gateway v10 长连接；私信直接回复，服务器频道被提及时响应，通过编辑消息流式显示回答 |
+| WhatsApp | 使用手机 WhatsApp 扫码关联设备 | WhatsApp Web 长连接；显示已读和“正在输入”，再发送最终回答 |
 
 其他 IM 平台可继续按同一渠道适配器结构接入。
 
+九个内置渠道均支持把 JPEG、PNG、WebP 图片，以及以图片文件方式发送的 GIF，连同可选文字说明发送给 Harness；单张图片上限为 5 MB，单条消息中的图片总大小上限为 20 MB。
+
 ## 安装
+
+推荐从 npm 安装已发布的稳定版本：
+
+```sh
+dsh plugin --profile web add -w @xmanrui/dsh-im
+```
+
+重启 `dsh web`，然后打开「设置 → 插件 → IM机器人」。
+
+如需试用尚未发布到 npm 的最新代码，可以改用 GitHub 源安装器：
 
 ```sh
 npx -y github:xmanrui/dsh-im install
 ```
 
-也可以直接从 npm 安装：
+GitHub 源安装会直接拉取并构建 Git 依赖；pnpm 10 及以上版本可能要求先在 profile 的 `pnpm-workspace.yaml` 中允许该依赖执行构建脚本。普通用户建议优先使用 npm 稳定版。
 
-```sh
-dsh plugin --profile web add @xmanrui/dsh-im
-```
+安装后，在对应渠道页面按照内置引导完成扫码或凭据配置。所有 Secret 和 Token 只提交给本机 Harness Host，并写入受保护的凭据存储；状态接口和机器人列表不会回传这些凭据。
 
-重启 `dsh web`，然后打开「设置 → 插件 → IM机器人」。安装器会用 `dsh-im` 替换 profile 中直接安装的 `dsh-feishu`、`dsh-weixin` 和 `dsh-dingtalk`，但不删除任何渠道数据；原有渠道凭据和扫码绑定会继续使用。
-
-飞书、QQ、钉钉和企业微信页面都提供两种入口：带二维码图标的蓝色「扫码接入机器人」按钮走平台官方扫码流程，右侧带钥匙图标的白色描边「手动接入」按钮连接已经创建的机器人应用。飞书和 QQ 分别填写 App ID + App Secret、AppID + AppSecret；钉钉填写官方 Client ID + Client Secret；企业微信填写官方 Bot ID + Secret。Secret 只提交给本机 Harness Host，并写入受保护的凭据存储；状态接口和机器人列表不会回传 Secret。
-
-Telegram 和 Discord 没有官方扫码创建机器人流程，因此页面只显示带钥匙图标的「手动接入」入口，并只要求 Bot Token。Telegram Token 由 @BotFather 生成；若该机器人已经配置 Webhook，需要先由原服务移除 Webhook，Bot API 长轮询才能接管消息。Discord Token 来自 Developer Portal 的 Bot 页面；还需把机器人邀请到目标服务器，并授予查看频道、发送消息和读取历史消息权限。本插件只读取私信和明确提及机器人的服务器消息，因此不要求 Message Content 特权 Intent。
-
-Slack 页面提供 Manifest 辅助创建与双 Token 接入。点击「开始接入」，复制页面提供的 App Manifest，再打开 Slack 创建页并选择 **From a manifest**；创建后在 **Basic Information → App-Level Tokens** 生成包含 `connections:write` 的 App Token，并在 **OAuth & Permissions** 将应用安装到工作区以取得 Bot Token。插件会验证两个 Token，再通过 Socket Mode 建立连接；Slack 没有官方扫码创建机器人流程。两个 Token 只提交到本机 Harness Host 并写入受保护的凭据存储，状态接口和机器人列表不会回传 Token。
-
-WhatsApp 页面只显示「扫码接入机器人」。打开手机 WhatsApp 的「设置 → 已关联设备 → 关联设备」，扫描 Harness 页面中的二维码即可，不需要 Meta 控制台、Cloud API、Webhook、Phone Number ID 或 Access Token。关联设备状态只保存在本机 `~/.dsh/integrations/dsh-whatsapp/auth`，浏览器只会收到一次性二维码和脱敏后的账号状态。个人账号可在 WhatsApp 的「给自己发消息」会话中直接使用；插件按消息 ID 过滤自己的回复，避免形成回复循环。
-
-建议为机器人准备独立 WhatsApp 号码。关联个人常用账号会让发给该账号的私聊消息成为 Harness 输入；群聊只有明确提及该账号或回复该账号消息时才会触发。请只把机器人号码开放给可信联系人，并在不再使用时同时从 Harness 和手机「已关联设备」中移除。
-
-钉钉扫码接入时，请使用已加入企业/组织且有权创建机器人的钉钉账号扫描页面二维码，再在钉钉授权页点击「一键创建新机器人」。若提示“该账号还未加入组织”，请先创建组织或换用已加入组织的账号后重新扫码。插件不设置本机二次批准流程，钉钉中的机器人可见范围就是入站访问范围，请只开放给信任的组织、群或成员。
-
-企业微信扫码接入时，请使用已加入企业且具有机器人创建或管理权限的企业微信账号，并在手机端确认创建智能机器人。扫码创建的是企业微信智能机器人，不是让插件直接登录个人微信账号。无论扫码还是凭据绑定，企业微信中的机器人可见范围就是入站访问范围，请只开放给信任的企业成员和群聊。
-
-QQ 扫码接入使用腾讯 QQBot v2 官方流程。默认腾讯授权页会把接入方显示为“第三方机器人”；扫码成功后创建的是 QQ 开放平台机器人，并不是让插件直接控制个人 QQ 账号。扫码绑定只接受扫码者的消息；手动凭据无法识别扫码人，因此使用 QQ 开放平台中的机器人可见范围作为入站访问范围。
-
-飞书扫码绑定会把扫码者作为允许使用者；手动凭据同样无法识别扫码人，因此使用飞书应用的可见范围作为入站访问范围。请在飞书开放平台中只向信任的租户、群或成员开放应用。
-
-每个机器人维护独立的 Harness 工作区。新接入机器人会把 Harness Host 进程当时的工作目录（`process.cwd()`）记录为默认值；该路径会持久化，不会因为以后从其他目录重启 Host 而改变。设置页的机器人卡片会显示当前路径，并可直接修改。
+| 默认行为 | 说明 |
+| --- | --- |
+| 机器人工作区 | 每个机器人独立保存工作区。新机器人默认使用 Host 当时的工作目录；之后可在机器人卡片中修改。 |
+| Agent Preset | 新会话默认继承 Harness 的 `agent-presets.default`；渠道显式配置优先，已有会话不受后续修改影响。 |
 
 ## 机器人命令
 
 | 命令 | 作用 |
 | --- | --- |
+| `/help` | 显示机器人支持的命令和用法。 |
+| `/new` | 解除当前聊天的会话绑定，让下一条普通消息开启全新 Harness 会话。 |
+| `/status` | 检查当前机器人与 DeepSeek Harness 的连接状态。 |
+| `/models` | 按序号列出当前配置的全部可用模型。 |
+| `/model` | 查看当前聊天绑定会话正在使用的模型。 |
+| `/model <序号或 Provider/模型ID>` | 切换当前聊天绑定会话的模型。 |
+| `/stop` | 立即停止当前聊天正在运行的任务，并保留尚未开始的排队消息。 |
+| `/steer <补充指令>` | 把补充指令立即加入当前聊天正在运行的任务。 |
+| `/compact` | 立即压缩当前聊天绑定会话的较早上下文。 |
 | `/workspace <工作区绝对路径>` | 切换当前机器人的 Harness 工作区。 |
 | `/workspacelist` | 列出当前 Harness Host 上仍然存在的工作区绝对路径。 |
 | `/sessionlist [工作区序号或绝对路径]` | 列出指定工作区登记的所有会话 ID 和标题；省略参数时使用当前工作区。 |
 | `/session <Session ID>` | 将当前聊天绑定到指定的已有 Harness 会话。 |
+| 交互式提问 | 回复选项序号、选项文字或自定义文字；多选时用逗号分隔。 |
+| 远程审批 | 回复 `批准` / `拒绝` / `同意` / `不同意` / `yes` / `no`。 |
 
-示例：`/workspace /Users/alice/projects/my-app`、`/sessionlist 2`、`/sessionlist /Users/alice/projects/my-app` 或 `/session session-id`
+示例：先发送 `/models`，再发送 `/model 2` 切换到列表中的第 2 个模型。其他命令示例：`/help`、`/new`、`/status`、`/model deepseek-official/deepseek-v4-pro`、`/steer 只检查配置文件`、`/stop`、`/compact`、`/workspace /Users/alice/projects/my-app`、`/sessionlist 2`、`/sessionlist /Users/alice/projects/my-app` 或 `/session session-id`
 
+### 命令说明
+
+- `/help` 不需要参数，也不会创建会话；它会返回当前机器人支持的完整命令列表。
+- `/status` 不需要参数，也不会向模型发送消息或改变会话绑定；它用于确认当前机器人能够连接 DeepSeek Harness。
+- `/new` 只解除当前聊天在 dsh-im 中保存的会话绑定，不会删除、清空或归档旧 Session。下一条普通消息会在当前工作区创建并绑定一个新 Session。任务正在运行或等待问题、审批时，应先完成交互或使用 `/stop`，再使用 `/new`。
+- `/models` 不需要参数，也不会创建会话。它为 Harness 当前配置的全部可用模型分配序号，同时显示可稳定复制的 `Provider/模型ID`；某个 Provider 查询失败时，其他 Provider 的结果仍会显示。
+- `/model` 不带参数时只查看当前会话模型；带参数时接受 `/models` 列出的序号或完整模型 ID，例如 `/model 2`。完整 ID 必须精确匹配。聊天尚无会话时，有效的切换命令会创建并绑定一个空白会话，但不会触发模型回复。切换只影响当前会话；Harness 还会尝试把它保存为以后新会话的默认模型，已有其他会话不受影响。
+- 正在运行任务或等待审批、问题回答时不能切换模型；请等待完成，或先使用 `/stop`。含图片的会话无法切换到不支持图片输入的模型。
+- `/stop` 和 `/steer` 只控制当前聊天自己发起的运行任务，即使多个聊天绑定同一个 Session，也不会有意控制其他聊天的任务。`/stop` 不删除会话或历史，并保留尚未开始的排队消息；重复发送是安全的。
+- `/steer` 只接受文字，可包含多行；它不会创建新会话或第二个任务。没有运行任务时请直接发送普通消息；等待审批或问题回答时请先处理交互，或使用 `/stop`。
+- `/compact` 只作用于当前聊天已经绑定的 Harness 会话，不会把命令发送给模型。当前聊天尚未创建会话、会话正在生成回复或没有可压缩历史时，机器人会直接返回对应状态。
 - 只接受已经存在的绝对目录；路径无效时机器人会返回具体提示和正确用法。
 - `/workspacelist` 不需要参数。它合并 Harness 全局登记项与当前机器人的路径；当前路径仍存在且可安全显示时会排在首位并标记为“当前”。结果可直接复制到 `/workspace` 命令。
 - `/sessionlist` 的数字参数按命令执行时与 `/workspacelist` 相同的最新顺序解析；也可使用绝对路径直接指定工作区。结果会回显最终选中的路径。
@@ -91,6 +133,15 @@ QQ 扫码接入使用腾讯 QQBot v2 官方流程。默认腾讯授权页会把�
 - 任何能执行 `/session` 的用户都能接续所选会话，并通过后续消息写入会话或触发其可用工具。请只向可信用户开放机器人及其会话列表。
 - 切换成功后只清除当前机器人的旧 Harness 会话映射，不影响其他机器人。
 - 新工作区对后续消息生效；已经开始生成的回复会继续完成。
+
+## 其它功能
+
+- **图片识别**：九个内置渠道都可以把 JPEG、PNG、WebP，以及以图片文件方式发送的 GIF 交给 Harness；图片可以附带文字说明。单张图片上限为 5 MB，单条消息中的图片总大小上限为 20 MB。
+- **在机器人卡片切换工作区**：设置页中的每张机器人卡片都会显示当前 Harness 工作区。可以直接填写已有目录的绝对路径，也可以打开目录选择器。切换只清除该机器人的旧聊天映射，不会删除、清空或归档旧 Session；已经开始的回复可以继续完成，后续消息使用新工作区。
+- **检查连接并发送测试消息**：机器人在线时，点击卡片上的「检查连接」会检查平台连接，并向该机器人最近记录的私聊发送一条“DeepSeek Harness 连接测试成功”消息；WhatsApp 会发送到账号自聊。测试消息不会创建 Harness Session，也不会调用模型。机器人必须至少收到过一条私聊才能记住测试目标，否则页面会提示尚无可用的测试会话。
+- **重试连接和移除接入**：机器人离线时，卡片上的操作会变为「重试连接」；不再使用时可以点击「移除接入」。这些操作都只作用于所选机器人，不影响其他机器人或渠道。
+- **多机器人独立管理**：同一渠道可以接入多个机器人。每个机器人分别保存凭据、连接状态、工作区和聊天会话映射，卡片上的工作区、连接检查、重试和移除操作互不影响。
+- **流式回复和进度提示**：插件会按各平台能力显示正在思考、工具执行和逐步生成的回答；不支持原生流式接口的平台会通过编辑消息、卡片更新或最终消息完成回复。
 
 ## 设计
 
@@ -123,143 +174,25 @@ IM 管理 RPC 默认仅接受回环浏览器。如果 Web profile 在受信任�
 
 ---
 
-## English
-
-Connect IM bots to DeepSeek Harness by scanning a QR code, using an App Manifest, or entering existing bot credentials. One plugin and one settings entry provide unified management for Feishu, WeChat, DingTalk, WeCom, QQ, Slack, Telegram, Discord, and WhatsApp bots.
-
-> GitHub description: Connect IM bots to DeepSeek Harness by QR code, App Manifest, or bot credentials (supports Feishu, WeChat, DingTalk, WeCom, QQ, Slack, Telegram, Discord, and WhatsApp).
-
-## Interface
-
-![IM bot settings page](docs/images/imbot.png)
-
-## Built-in channels
-
-- Feishu: create a bot by QR code or bind an existing bot with App ID + App Secret, then send and receive messages over a persistent connection.
-- WeChat: bind a WeChat bot by scanning a QR code, then send and receive messages through Tencent iLink long polling.
-- DingTalk: create a bot by QR code or bind an existing bot with Client ID + Client Secret, receive messages through DingTalk Stream, and stream Harness replies through AI Cards.
-- WeCom: create an intelligent bot by QR code or bind an existing bot with Bot ID + Secret, receive messages over the official WebSocket connection, and natively show a thinking state, tool progress, and streaming replies.
-- QQ: create a bot by QR code or bind an existing bot with AppID + AppSecret, receive messages over a WebSocket connection, stream private-chat replies with a native typing indicator, and reply in groups when mentioned.
-- Slack: use the bundled App Manifest to create and configure an app, enter its Bot Token (`xoxb-`) and App Token (`xapp-`), receive events over Socket Mode, reply directly in DMs and only when mentioned in channels, and prefer Slack's native streaming-message API for Harness output.
-- Telegram: bind a BotFather-created bot with its Bot Token, receive messages through Bot API long polling, reply directly in private chats, require a mention or reply in groups, and stream Harness output by editing the reply.
-- Discord: bind a Developer Portal bot with its Bot Token, receive events through Gateway v10, reply directly in DMs, require a mention in server channels, and stream Harness output by editing the reply.
-- WhatsApp: scan a QR code to link a WhatsApp device, receive messages over WhatsApp Web, show a native read receipt and typing indicator, and then send the final Harness answer.
-
-Every channel supports Harness approvals: when Harness needs an approval, the bot sends the approval prompt directly to the conversation, and the user can answer “同意”, “批准”, “yes”, etc. to continue, or “拒绝”, “no”, etc. to decline the tool call. The prompt follows the language of the user's message (Chinese or English).
-
-Other IM platforms can be added through the same channel-adapter structure.
-
-## Installation
-
-```sh
-npx -y github:xmanrui/dsh-im install
-```
-
-Alternatively, install it directly from npm:
-
-```sh
-dsh plugin --profile web add @xmanrui/dsh-im
-```
-
-Restart `dsh web`, then open **Settings → Plugins → IM Bot**. The installer replaces directly installed `dsh-feishu`, `dsh-weixin`, and `dsh-dingtalk` entries in the profile with `dsh-im` without deleting channel data.
-
-Feishu, QQ, DingTalk, and WeCom each provide two entry points. The blue **QR access** action uses the platform QR flow; the key-marked, outlined **Manual access** action immediately to its right connects an existing bot application. Feishu and QQ use App ID + App Secret and AppID + AppSecret respectively, DingTalk uses Client ID + Client Secret, and WeCom uses Bot ID + Secret. Secrets are sent only to the local Harness Host and stored through its protected credential provider; status responses and bot lists never return them.
-
-Telegram and Discord do not provide an official QR flow for creating bots, so their pages expose only the key-marked **Manual access** action and request a Bot Token. Generate the Telegram token with BotFather; an existing webhook must be removed by its current service before Bot API long polling can receive updates. Generate the Discord token on the Developer Portal's Bot page, invite the bot to the target server, and grant View Channel, Send Messages, and Read Message History. The plugin reads DMs and server messages that explicitly mention the bot, so it does not request the privileged Message Content intent.
-
-Slack provides Manifest-assisted creation with dual-Token access. Choose **Start setup**, copy the bundled App Manifest, open Slack's create page, and select **From a manifest**. Under **Basic Information → App-Level Tokens**, generate an App Token with `connections:write`; then install the app to the workspace under **OAuth & Permissions** to obtain the Bot Token. The plugin validates both Tokens before opening Socket Mode. Slack has no official QR-based bot-creation flow. Both Tokens are sent only to the local Harness Host and stored through its protected credential provider; status responses and bot lists never return them.
-
-WhatsApp exposes only **QR access**. On the phone, open **WhatsApp → Settings → Linked devices → Link a device**, then scan the QR code shown by Harness. No Meta console, Cloud API, Webhook, Phone Number ID, or Access Token is required. Linked-device state stays under `~/.dsh/integrations/dsh-whatsapp/auth`; the browser receives only the one-time QR code and redacted account status. Personal accounts can use WhatsApp's **Message yourself** chat directly; the plugin suppresses only its own exact reply message IDs to prevent reply loops.
-
-Use a dedicated WhatsApp number for the bot when possible. Linking a personal account makes DMs sent to that account eligible Harness input; group messages trigger only when they mention or reply to the linked account. Limit the number to trusted contacts, and remove the device from both Harness and the phone's **Linked devices** list when it is no longer used.
-
-For DingTalk QR binding, scan with an account that belongs to an enterprise or organization and can create bots, then choose **Create a new bot** on the authorization page. If DingTalk reports that the account has not joined an organization, create one or switch to an account that has, then scan again. There is no second local sender-approval flow: the bot's DingTalk visibility is its inbound access scope, so restrict it to trusted organizations, groups, or members.
-
-For WeCom QR binding, scan with an account that belongs to an enterprise and can create or manage bots, then confirm creation of the intelligent bot in the mobile app. This creates a WeCom intelligent bot; it does not sign the plugin into a personal WeChat account. For both QR and credential binding, restrict the bot's WeCom visibility to trusted enterprise members and group chats.
-
-QQ QR binding uses Tencent's official QQBot v2 flow. Tencent's default authorization page labels the integration as a third-party bot. Scanning creates a QQ Open Platform bot; it does not give the plugin direct control of a personal QQ account. QR binding accepts only the scanner's messages. Manual credentials cannot identify a scanner, so the bot's QQ Open Platform visibility becomes its inbound access scope.
-
-Feishu QR binding records the scanner as an allowed user. Manual credentials cannot identify a scanner, so the Feishu application's visibility becomes its inbound access scope. Restrict the application to trusted tenants, groups, or members.
-
-Each bot maintains an independent Harness workspace. A newly connected bot records the Harness Host process's current working directory (`process.cwd()`) as its default; the path is persisted and does not change when the Host is later restarted from another directory. Every bot card shows the current path and lets it be edited.
-
-## Bot commands
-
-| Command | Description |
-| --- | --- |
-| `/workspace <absolute workspace path>` | Switch the current bot's Harness workspace. |
-| `/workspacelist` | List workspace absolute paths that still exist on the current Harness Host. |
-| `/sessionlist [workspace number or absolute path]` | List every registered session ID and title in the selected workspace; omit the argument to use the current workspace. |
-| `/session <Session ID>` | Bind the current chat to an existing Harness session. |
-
-Examples: `/workspace /Users/alice/projects/my-app`, `/sessionlist 2`, `/sessionlist /Users/alice/projects/my-app`, or `/session session-id`
-
-- The path must be an existing absolute directory. The bot returns an actionable error and the correct usage when validation fails.
-- `/workspacelist` takes no arguments. It combines the Harness global registry with the current bot's path. When that current path still exists and is safe to display, it appears first and is marked as current. Any listed path can be copied directly into `/workspace`.
-- A numeric `/sessionlist` argument uses the same freshly resolved order as `/workspacelist` at command execution time. An absolute path can also select a workspace directly, and the result echoes the resolved path.
-- `/sessionlist` includes every session registered to the selected workspace. Archived sessions are marked as archived; blank and subagent sessions are included when they belong to that workspace; sessions without a title are shown as `No title yet`. Any listed ID can be passed directly to `/session Session ID`.
-- `/session` accepts exactly one Session ID obtained from `/sessionlist`. It neither creates a session nor immediately prompts the model; later messages in the current chat continue the bound session. Regular archived sessions can be bound without being unarchived, while subagent sessions cannot be bound.
-- `/session` locates the session's unique workspace automatically. Binding inside the current workspace replaces only this chat's mapping. A cross-workspace binding switches the bot workspace, clears the old session mappings for all of that bot's chats, and then binds this chat, so it affects the bot's other chats. A reply already being generated may still finish.
-- Workspace switches and session bindings only clear or replace dsh-im chat mappings. They never delete, empty, or archive old Session contents; an old Session can still be listed and bound again.
-- Any user who is already within the platform bot's visibility scope and can normally message it can run these commands; there is no additional administrator/ordinary-user distinction.
-- The list comes from the Harness Host's global registry and can include local absolute paths for other bots, other channels, or non-IM projects. Restrict the bot's visibility to trusted users.
-- Session results also come from the global Harness Host. Session IDs and titles can belong to other bots, other channels, or non-IM projects, and may contain sensitive metadata. Enable these commands only when every user in the bot's visibility scope is trusted.
-- Any user who can run `/session` can continue the selected session and use later messages to write to it or invoke its available tools. Expose the bot and session list only to trusted users.
-- A successful switch clears only the current bot's old Harness session mappings and does not affect other bots.
-- The new workspace applies to subsequent messages; a reply that has already started generating is allowed to finish.
-
-## Design
-
-- Registers a single **IM Bot** settings page in Harness.
-- Maintains all nine channel Host, client, and runtime sources in this repository without external standalone channel plugins.
-- Follows the DeepSeek Harness language preference and switches the settings UI live between Chinese and English.
-- Uses channel logos for WeChat, Feishu, DingTalk, WeCom, QQ, Slack, Telegram, Discord, and WhatsApp navigation without enable/disable switches.
-- Keeps RPC endpoints, credentials, connection supervision, and session mappings isolated by channel.
-- Returns only QR codes, the public Slack Manifest, and redacted status data to the browser. Manually entered secrets and Tokens travel one way to the local Host; no RPC response returns App Secrets, `bot_token`, DingTalk `client_secret`, WeCom Secrets, QQ `app_secret`, Slack Bot/App Tokens, Telegram/Discord Bot Tokens, WhatsApp linked-device keys, or raw user identifiers.
-
-## Local development
-
-```sh
-npm install
-npm run check
-node bin/dsh-im.mjs install --source .
-```
-
-`npm run check` runs unit tests, builds the Host and Client artifacts, and verifies that the published package contains neither credentials nor standalone channel settings-page registrations.
-
-IM management RPCs accept loopback browsers by default. When a Web profile is deliberately served on a trusted LAN, opt the plugin into the Host authorities already trusted by Connection in that profile's `cordis.patch.yml`:
-
-```yaml
-- id: xmanrui-dsh-im
-  config:
-    rpcAuthority: trusted-host
-```
-
-`trusted-host` reuses Harness's Host/Origin fence; it is not user authentication. Anyone who can reach that LAN authority can inspect bot status, scan or submit application credentials, reconnect bots, and remove bots. Enable it only on a trusted network.
-
----
-
-## 联系方式 / Contact
+## 联系方式
 
 欢迎通过邮箱、微信或小红书联系我。
 
-You can reach me by email, WeChat, or Xiaohongshu.
-
 <table>
   <tr>
-    <th align="center">邮箱 / Email</th>
-    <th align="center">微信 / WeChat</th>
-    <th align="center">小红书 / Xiaohongshu</th>
+    <th align="center">邮箱</th>
+    <th align="center">微信</th>
+    <th align="center">小红书</th>
   </tr>
   <tr>
     <td align="center" valign="middle">
       <a href="mailto:longmanr307@gmail.com">longmanr307@gmail.com</a>
     </td>
     <td align="center" valign="top">
-      <a href="docs/images/weixin.jpg"><img src="docs/images/weixin.jpg" alt="微信二维码 / WeChat QR code" width="240"></a>
+      <a href="docs/images/weixin.jpg"><img src="docs/images/weixin.jpg" alt="微信二维码" width="240"></a>
     </td>
     <td align="center" valign="top">
-      <a href="docs/images/xhs.jpg"><img src="docs/images/xhs.jpg" alt="小红书二维码 / Xiaohongshu QR code" width="240"></a>
+      <a href="docs/images/xhs.jpg"><img src="docs/images/xhs.jpg" alt="小红书二维码" width="240"></a>
     </td>
   </tr>
 </table>

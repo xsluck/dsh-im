@@ -1,5 +1,9 @@
 import { FeishuHarnessBridge } from './bridge.mjs';
 import { VerifiedFeishuChannel } from './feishu-channel.mjs';
+import {
+  connectionTestTargetUnavailable,
+  sendRememberedConnectionTest,
+} from '../shared/connection-test.mjs';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -238,6 +242,47 @@ export class FeishuRuntime {
       await this.stop({ preserveError: true });
       throw error;
     }
+  }
+
+  async sendConnectionTest(text) {
+    if (!this.#status.ready || !this.#client) {
+      const error = new Error('飞书机器人尚未连接');
+      error.code = 'test-target-unavailable';
+      throw error;
+    }
+    if (typeof text !== 'string' || !text.trim()) {
+      throw new TypeError('Feishu connection test text is required');
+    }
+    const send = async (receiveIdType, receiveId, content) => {
+      const response = await this.#client.im.v1.message.create({
+        params: { receive_id_type: receiveIdType },
+        data: {
+          receive_id: receiveId,
+          msg_type: 'text',
+          content: JSON.stringify({ text: content }),
+        },
+      });
+      if (response?.code && response.code !== 0) {
+        throw new Error(`Feishu connection test failed: ${response.msg || response.code}`);
+      }
+    };
+
+    const ownerOpenId = this.#ownerOpenIds.find((value) => value !== '*');
+    if (ownerOpenId) {
+      await send('open_id', ownerOpenId, text);
+      return { sent: true };
+    }
+
+    return sendRememberedConnectionTest({
+      state: this.#state,
+      text,
+      channelLabel: '飞书机器人',
+      send: async (target, content) => {
+        const chatId = typeof target?.chatId === 'string' ? target.chatId.trim() : '';
+        if (!chatId) throw connectionTestTargetUnavailable('飞书机器人');
+        await send('chat_id', chatId, content);
+      },
+    });
   }
 
   async stop({ preserveError = false } = {}) {

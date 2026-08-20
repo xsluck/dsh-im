@@ -1,3 +1,11 @@
+import { ImagePromptError } from '../shared/image-prompt.mjs';
+
+const FEISHU_MISSING_MESSAGE_SCOPE_CODE = 99991672;
+const FEISHU_ERROR_BODY_LIMIT = 64 * 1024;
+const FEISHU_ERROR_BODY_TIMEOUT_MS = 1_000;
+const FEISHU_IMAGE_PERMISSION_MESSAGE =
+  '飞书机器人缺少图片读取权限。请在飞书开放平台为该应用添加 im:message:readonly，发布新版本并完成必要的管理员审批后，再重新发送图片。';
+
 export function conversationKey(event) {
   const chatType = event?.message?.chat_type;
   if (chatType === 'p2p') {
@@ -10,19 +18,232 @@ export function conversationKey(event) {
   return `group:${chatId}`;
 }
 
-export function extractText(event) {
-  if (event?.message?.message_type !== 'text') return null;
-  let parsed;
+function parsedMessageContent(event) {
+  const value = event?.message?.content;
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
   try {
-    parsed = JSON.parse(event.message.content);
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
   } catch {
     return null;
   }
-  let text = typeof parsed.text === 'string' ? parsed.text : '';
-  for (const mention of event.message.mentions ?? []) {
-    if (typeof mention.key === 'string' && mention.key) text = text.replaceAll(mention.key, '');
+}
+
+function withoutMentions(text, event) {
+  let result = typeof text === 'string' ? text : '';
+  for (const mention of event?.message?.mentions ?? []) {
+    if (typeof mention?.key === 'string' && mention.key) {
+      result = result.replaceAll(mention.key, '');
+    }
   }
-  return text.trim();
+  return result.trim();
+}
+
+export function extractText(event) {
+  if (event?.message?.message_type !== 'text') return null;
+  const parsed = parsedMessageContent(event);
+  return parsed ? withoutMentions(parsed.text, event) : null;
+}
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function postContent(event, parsed = parsedMessageContent(event)) {
+  if (event?.message?.message_type !== 'post') return null;
+  if (!parsed) return null;
+
+  const lines = [];
+  const title = nonEmptyString(withoutMentions(parsed.title, event));
+  if (title) lines.push(title);
+  const imageKeys = [];
+  for (const paragraph of Array.isArray(parsed.content) ? parsed.content : []) {
+    if (!Array.isArray(paragraph)) continue;
+    let visibleText = '';
+    for (const element of paragraph) {
+      const tag = String(element?.tag ?? '').toLowerCase();
+      if (tag === 'img') {
+        const key = nonEmptyString(element?.image_key);
+        if (key) imageKeys.push(key);
+      } else if (tag === 'text' || tag === 'a' || tag === 'link') {
+        if (typeof element?.text === 'string') visibleText += element.text;
+      }
+    }
+    const line = nonEmptyString(withoutMentions(visibleText, event));
+    if (line) lines.push(line);
+  }
+
+  return {
+    text: lines.join('\n'),
+    imageKeys,
+  };
+}
+
+function headerValue(headers, name) {
+  if (typeof headers?.get === 'function') return headers.get(name);
+  return headers?.[name] ?? headers?.[name.toLowerCase()] ?? null;
+}
+
+function declaredSize(headers) {
+  const header = headerValue(headers, 'content-length');
+  if (header === null || header === undefined || header === '') return null;
+  const value = Number(header);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+async function readBoundedStream(stream, { signal, maxBytes }) {
+  if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') {
+    throw new Error('Feishu image download returned no readable stream');
+  }
+  signal?.throwIfAborted();
+  const abort = () => stream.destroy?.(
+    signal.reason ?? new DOMException('Feishu image download aborted', 'AbortError'),
+  );
+  signal?.addEventListener('abort', abort, { once: true });
+  const chunks = [];
+  let size = 0;
+  try {
+    for await (const chunk of stream) {
+      signal?.throwIfAborted();
+      const data = Buffer.from(chunk);
+      size += data.length;
+      if (size > maxBytes) {
+        stream.destroy?.();
+        throw new ImagePromptError(
+          'image-too-large',
+          `Feishu image exceeds ${maxBytes} bytes`,
+          '图片超过 5 MB，请压缩后重试。',
+        );
+      }
+      chunks.push(data);
+    }
+    signal?.throwIfAborted();
+    return Buffer.concat(chunks, size);
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
+function providerCode(value) {
+  if (!value || typeof value !== 'object') return null;
+  const code = value.code ?? value.error?.code;
+  return Number.isSafeInteger(Number(code)) ? Number(code) : null;
+}
+
+async function readFeishuErrorBody(stream, signal) {
+  if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') return null;
+  signal?.throwIfAborted();
+  const timeout = AbortSignal.timeout(FEISHU_ERROR_BODY_TIMEOUT_MS);
+  const readSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const abort = () => stream.destroy?.(readSignal.reason);
+  readSignal.addEventListener('abort', abort, { once: true });
+  const chunks = [];
+  let size = 0;
+  try {
+    for await (const chunk of stream) {
+      const data = Buffer.from(chunk);
+      size += data.length;
+      if (size > FEISHU_ERROR_BODY_LIMIT) {
+        stream.destroy?.();
+        return null;
+      }
+      chunks.push(data);
+    }
+    return Buffer.concat(chunks, size).toString('utf8');
+  } catch {
+    signal?.throwIfAborted();
+    return null;
+  } finally {
+    readSignal.removeEventListener('abort', abort);
+  }
+}
+
+async function feishuProviderCode(error, signal) {
+  const pending = [error];
+  const seen = new Set();
+  while (pending.length > 0 && seen.size < 8) {
+    const value = pending.shift();
+    if (!value || (typeof value !== 'object' && typeof value !== 'function') || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    const directCode = providerCode(value);
+    const data = value.response?.data ?? value.data;
+    if (directCode === FEISHU_MISSING_MESSAGE_SCOPE_CODE) {
+      data?.destroy?.();
+      return directCode;
+    }
+    if (data && typeof data[Symbol.asyncIterator] === 'function') {
+      const body = await readFeishuErrorBody(data, signal);
+      try {
+        const parsedCode = providerCode(JSON.parse(body));
+        if (parsedCode === FEISHU_MISSING_MESSAGE_SCOPE_CODE) return parsedCode;
+      } catch {
+        // Non-JSON provider failures keep the generic image download message.
+      }
+    } else {
+      const dataCode = providerCode(data);
+      if (dataCode === FEISHU_MISSING_MESSAGE_SCOPE_CODE) return dataCode;
+    }
+    pending.push(value.cause);
+  }
+  return null;
+}
+
+async function feishuImageDownloadError(error, signal) {
+  if (await feishuProviderCode(error, signal) !== FEISHU_MISSING_MESSAGE_SCOPE_CODE) return error;
+  return new ImagePromptError(
+    'feishu-image-permission-required',
+    'Feishu image download requires the im:message:readonly tenant scope',
+    FEISHU_IMAGE_PERMISSION_MESSAGE,
+    { cause: error },
+  );
+}
+
+function feishuImageSource(event, client, key) {
+  return {
+    async load({ signal, maxBytes }) {
+      signal?.throwIfAborted();
+      let resource;
+      try {
+        resource = await client?.im?.v1?.messageResource?.get?.({
+          path: {
+            message_id: event.message.message_id,
+            file_key: key,
+          },
+          params: { type: 'image' },
+        });
+      } catch (error) {
+        throw await feishuImageDownloadError(error, signal);
+      }
+      signal?.throwIfAborted();
+      const size = declaredSize(resource?.headers);
+      if (size !== null && size > maxBytes) {
+        resource?.getReadableStream?.().destroy?.();
+        throw new ImagePromptError(
+          'image-too-large',
+          `Feishu image declares ${size} bytes; the limit is ${maxBytes}`,
+          '图片超过 5 MB，请压缩后重试。',
+        );
+      }
+      return readBoundedStream(resource?.getReadableStream?.(), { signal, maxBytes });
+    },
+  };
+}
+
+export function extractInboundMessage(event, client) {
+  const messageType = event?.message?.message_type;
+  const parsed = parsedMessageContent(event);
+  const post = postContent(event, parsed);
+  const standaloneImageKey = messageType === 'image'
+    ? nonEmptyString(parsed?.image_key)
+    : null;
+  const imageKeys = standaloneImageKey ? [standaloneImageKey] : post?.imageKeys ?? [];
+  return {
+    content: messageType === 'text' ? extractText(event) ?? '' : post?.text ?? '',
+    images: imageKeys.map((key) => feishuImageSource(event, client, key)),
+  };
 }
 
 export function splitText(text, maxChars = 9000) {

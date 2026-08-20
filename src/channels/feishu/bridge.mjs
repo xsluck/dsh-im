@@ -1,16 +1,32 @@
 import {
   conversationKey,
+  extractInboundMessage,
   extractText,
   isAllowedSender,
   isBotSender,
   splitText,
 } from './message-utils.mjs';
 import {
+  hasInboundImages,
+  imagePromptUserMessage,
+  promptContentForMessage,
+} from '../shared/image-prompt.mjs';
+import {
   harnessAnswerForQuestion,
   harnessQuestionText,
   validHarnessQuestion,
 } from '../shared/harness-question.mjs';
 import { HarnessApprovalQueue } from '../shared/harness-approval.mjs';
+import { runCompactCommand } from '../shared/compact-command.mjs';
+import {
+  isControlCommand,
+  runControlCommand,
+} from '../shared/control-command.mjs';
+import { rememberConnectionTestTarget } from '../shared/connection-test.mjs';
+import {
+  isModelCommand,
+  runModelCommand,
+} from '../shared/model-command.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
 
@@ -20,12 +36,18 @@ const RESOLVED_REPLY_TTL_MS = 30 * 60_000;
 const HELP_TEXT = [
   '北汇星河 AIOS 已连接 DeepSeek Harness。',
   '',
-  '直接发送问题即可继续当前会话。',
+  '直接发送文字或图片即可继续当前会话。',
   '/new  开启一个全新会话',
+  '/compact  压缩当前会话的较早上下文',
   '/workspace 工作区绝对路径  切换工作区',
   '/workspacelist  列出工作区绝对路径',
   '/sessionlist [工作区序号或绝对路径]  列出会话 ID 和标题',
-  '/session Session ID  将当前聊天绑定到指定会话',
+  '/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话',
+  '/models  按序号列出所有可用模型',
+  '/model [序号或完整模型ID]  查看或切换当前会话模型',
+  '示例：先发 /models，再发 /model 2',
+  '/stop  停止当前任务',
+  '/steer 补充指令  纠偏当前任务',
   '/status  检查连接状态',
   '/help  显示本帮助',
 ].join('\n');
@@ -68,6 +90,7 @@ export class FeishuHarnessBridge {
   #resolvedQuestionReplies = new Map();
   #acceptedMessageIds = new Set();
   #interactionTasks = new Set();
+  #commandTasks = new Set();
   #approvals;
   #status;
   #allowedSenderOpenIds;
@@ -125,8 +148,44 @@ export class FeishuHarnessBridge {
       return Promise.resolve();
     }
 
+    if (event.message.chat_type === 'p2p') {
+      const chatId = nonEmptyString(event.message.chat_id);
+      if (chatId) rememberConnectionTestTarget(this.#state, { chatId });
+    }
+
     this.#acceptedMessageIds.add(messageId);
     const processingReaction = this.#addReaction(messageId, 'OnIt');
+    const commandMessage = extractInboundMessage(event, this.#client);
+    const commandText = nonEmptyString(commandMessage.content) ?? '';
+    const commandRunner = isControlCommand(commandText)
+      ? runControlCommand
+      : (isModelCommand(commandText) ? runModelCommand : null);
+    const addressed = event?.message?.chat_type === 'p2p'
+      || (Array.isArray(event?.message?.mentions) && event.message.mentions.length > 0);
+    if (commandRunner && addressed) {
+      const processing = this.#processFastCommand(
+        event,
+        messageId,
+        key,
+        commandMessage,
+        commandRunner,
+      );
+      let current;
+      current = processing
+        .then(() => this.#finishReaction(messageId, processingReaction, 'DONE'))
+        .catch((error) => this.#handleMessageFailure(
+          event,
+          messageId,
+          processingReaction,
+          error,
+        ))
+        .finally(() => {
+          this.#acceptedMessageIds.delete(messageId);
+          this.#commandTasks.delete(current);
+        });
+      this.#commandTasks.add(current);
+      return current;
+    }
     if (this.#isResolvedQuestionReply(event, key)) {
       const current = Promise.resolve()
         .then(() => this.#discardResolvedInteractionReply(event, messageId))
@@ -262,6 +321,10 @@ export class FeishuHarnessBridge {
   }
 
   async #handleMessageFailure(event, messageId, processingReaction, error) {
+    if (error?.code === 'turn-stopped') {
+      await this.#removeProcessingReaction(messageId, processingReaction);
+      return;
+    }
     if (this.#signal?.aborted) {
       await this.#removeProcessingReaction(messageId, processingReaction);
       return;
@@ -271,7 +334,8 @@ export class FeishuHarnessBridge {
     await this.#finishReaction(messageId, processingReaction, 'ERROR');
     await this.#send(
       event.message.chat_id,
-      '处理失败，请稍后重试。如果问题持续，请在 DeepSeek Harness 的飞书插件页面检查连接状态。',
+      imagePromptUserMessage(error)
+        ?? '处理失败，请稍后重试。如果问题持续，请在 DeepSeek Harness 的飞书插件页面检查连接状态。',
     ).catch(() => undefined);
   }
 
@@ -282,7 +346,39 @@ export class FeishuHarnessBridge {
         pending.queue ? [pending.queue] : []
       )),
       ...this.#interactionTasks,
+      ...this.#commandTasks,
     ]);
+  }
+
+  async #processFastCommand(event, messageId, key, message, runner) {
+    this.#signal?.throwIfAborted();
+    if (this.#state.hasSeen(messageId)) return;
+    await this.#state.markSeen(messageId);
+    this.#status.lastMessageAt = new Date().toISOString();
+    this.#status.messagesReceived += 1;
+    const result = await runner(
+      nonEmptyString(message.content) ?? '',
+      this.#harness,
+      this.#state,
+      key,
+      {
+        signal: this.#signal,
+        hasImages: hasInboundImages(message),
+        pendingInteraction: this.#pendingInteractions.has(key)
+          || this.#approvals.hasPending(key),
+        control: { owner: this, key },
+      },
+    );
+    if (result?.stopped) {
+      await Promise.allSettled([
+        this.#cancelPendingInteraction(key),
+        this.#approvals.closeRoute(key),
+      ]);
+    }
+    for (const reply of result?.messages ?? [result?.message]) {
+      if (reply) await this.#send(event.message.chat_id, reply);
+    }
+    this.#status.lastError = null;
   }
 
   async #handle(event, key, { alreadyRecorded = false } = {}) {
@@ -295,37 +391,55 @@ export class FeishuHarnessBridge {
       this.#status.messagesReceived += 1;
     }
 
-    const text = extractText(event);
-    if (!text) {
-      await this.#send(event.message.chat_id, '目前仅支持文字消息。');
+    const message = extractInboundMessage(event, this.#client);
+    const text = message.content;
+    const hasImages = hasInboundImages(message);
+    const commandText = event.message.message_type === 'text' && !hasImages ? text : null;
+    if (!text && !hasImages) {
+      await this.#send(event.message.chat_id, '目前支持文字和图片消息。');
       return;
     }
 
-    if (text === '/help') {
+    if (commandText === '/help') {
       await this.#send(event.message.chat_id, HELP_TEXT);
       return;
     }
-    if (text === '/new') {
+    if (commandText === '/new') {
       await this.#state.clearSession(key);
       await this.#send(event.message.chat_id, '已开启全新 Harness 会话。');
       return;
     }
-    if (text === '/status') {
+    if (commandText === '/status') {
       await this.#harness.ensureRunning({ signal: this.#signal });
       await this.#send(event.message.chat_id, '飞书机器人与 DeepSeek Harness 连接正常。');
       return;
     }
-    const workspaceCommand = await runWorkspaceCommand(text, this.#harness, key);
+    const workspaceCommand = commandText === null
+      ? null
+      : await runWorkspaceCommand(text, this.#harness, key);
     if (workspaceCommand) {
       for (const reply of workspaceCommand.messages ?? [workspaceCommand.message]) {
         await this.#send(event.message.chat_id, reply);
       }
       return;
     }
+    const compactCommand = commandText === null
+      ? null
+      : await runCompactCommand(
+          commandText,
+          this.#harness,
+          this.#state,
+          key,
+          { signal: this.#signal },
+        );
+    if (compactCommand) {
+      await this.#send(event.message.chat_id, compactCommand.message);
+      return;
+    }
 
     this.#logger.info?.(`[dsh-feishu] processing ${event.message.chat_type} message ${messageId}`);
     try {
-      await this.#answerWithStream(event, key, text);
+      await this.#answerWithStream(event, key, message);
       this.#status.messagesReplied += 1;
       this.#status.lastReplyAt = new Date().toISOString();
       this.#status.lastError = null;
@@ -339,6 +453,7 @@ export class FeishuHarnessBridge {
     return {
       timeoutMs: this.#replyTimeoutMs,
       signal: this.#signal,
+      control: { owner: this, key },
       onInteraction: (interaction) => this.#handleInteraction(interaction, {
         key,
         actor: senderOpenId(event),
@@ -349,15 +464,20 @@ export class FeishuHarnessBridge {
     };
   }
 
-  async #answerWithStream(event, key, text) {
+  async #answerWithStream(event, key, message) {
     const chatId = event.message.chat_id;
     const messageId = event.message.message_id;
+    const text = message.content;
+    const content = hasInboundImages(message)
+      ? await promptContentForMessage(message, { signal: this.#signal })
+      : undefined;
     if (!this.#channel?.stream) {
       const { answer } = await askInWorkspaceSession({
         harness: this.#harness,
         state: this.#state,
         key,
         text,
+        content,
         createOptions: { signal: this.#signal },
         existsOptions: { signal: this.#signal },
         askOptions: this.#interactionAskOptions(event, key),
@@ -385,6 +505,7 @@ export class FeishuHarnessBridge {
             state: this.#state,
             key,
             text,
+            content,
             createOptions: { signal: this.#signal },
             existsOptions: { signal: this.#signal },
             askOptions,
@@ -412,6 +533,7 @@ export class FeishuHarnessBridge {
         state: this.#state,
         key,
         text,
+        content,
         createOptions: { signal: this.#signal },
         existsOptions: { signal: this.#signal },
         askOptions: this.#interactionAskOptions(event, key),

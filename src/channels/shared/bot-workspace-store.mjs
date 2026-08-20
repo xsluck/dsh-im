@@ -9,6 +9,7 @@ import {
 } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
 
+import { CONNECTION_TEST_STATE_IDENTITY } from './connection-test.mjs';
 import { WORKSPACE_SESSION_STALE } from './workspace-session.mjs';
 
 const EMPTY_DOCUMENT = Object.freeze({ version: 1, workspaces: Object.freeze({}) });
@@ -510,7 +511,9 @@ export function createBotWorkspaceScope(harness, { botId, workspaces, state }) {
           }
         };
       }
-      if ((property === 'listWorkspaces' || property === 'listWorkspaceSessions')
+      if ((property === 'listWorkspaces'
+        || property === 'listWorkspaceSessions'
+        || property === 'listModels')
         && typeof target[property] === 'function') {
         return async (...args) => {
           if (!isCurrentScope()) {
@@ -626,12 +629,54 @@ export function createBotWorkspaceScope(harness, { botId, workspaces, state }) {
           sessionGenerations.delete(sessionId);
           const isCurrentSession = () => isCurrentScope()
             && generation === workspaces.generationFor(botId);
+          const invokeCurrentSession = async (method, args, action) => {
+            if (!isCurrentSession()) {
+              throw workspaceSessionStale(
+                `The bot workspace changed before this ${action} started.`,
+              );
+            }
+            const result = await target[method](sessionId, ...args);
+            if (!isCurrentSession()) {
+              throw workspaceSessionStale(
+                `The bot workspace changed while this ${action} was running.`,
+              );
+            }
+            return result;
+          };
+          const invokeStartedSessionMutation = async (method, args, action) => {
+            if (!isCurrentSession()) {
+              throw workspaceSessionStale(
+                `The bot workspace changed before this ${action} started.`,
+              );
+            }
+            // Once an irreversible control mutation has started, preserve its
+            // actual outcome even if a workspace switch commits concurrently.
+            return target[method](sessionId, ...args);
+          };
           return Object.freeze({
             sessionId,
             async sessionExists(...args) {
               if (!isCurrentSession()) return false;
               const exists = await target.sessionExists(sessionId, ...args);
               return isCurrentSession() && exists;
+            },
+            models(...args) {
+              return invokeCurrentSession('getSessionModels', args, 'model listing');
+            },
+            selectModel(...args) {
+              return invokeCurrentSession('selectSessionModel', args, 'model selection');
+            },
+            isRunning(...args) {
+              return invokeCurrentSession('isSessionRunning', args, 'run-state check');
+            },
+            hasActiveTurn(...args) {
+              return invokeCurrentSession('hasActiveTurn', args, 'turn ownership check');
+            },
+            stopActiveTurn(...args) {
+              return invokeStartedSessionMutation('stopActiveTurn', args, 'turn stop');
+            },
+            steerActiveTurn(...args) {
+              return invokeStartedSessionMutation('steerActiveTurn', args, 'turn steering');
             },
             ask(...args) {
               if (!isCurrentSession()) {
@@ -668,12 +713,26 @@ export function createBotWorkspaceScope(harness, { botId, workspaces, state }) {
           return target.ask(sessionId, ...args);
         };
       }
+      if (property === 'executeCommand' && typeof target.executeCommand === 'function') {
+        return (sessionId, ...args) => {
+          const generation = sessionGenerations.get(sessionId);
+          sessionGenerations.delete(sessionId);
+          if (!isCurrentScope()
+            || (generation !== undefined && generation !== workspaces.generationFor(botId))) {
+            const error = new Error('The bot workspace changed before this command started.');
+            error.code = WORKSPACE_SESSION_STALE;
+            throw error;
+          }
+          return target.executeCommand(sessionId, ...args);
+        };
+      }
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
   const scopedState = new Proxy(state, {
     get(target, property) {
+      if (property === CONNECTION_TEST_STATE_IDENTITY) return target;
       if (property === 'sessionFor') {
         return (key, ...args) => {
           if (!isCurrentScope()) return null;

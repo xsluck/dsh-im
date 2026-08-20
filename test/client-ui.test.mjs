@@ -111,9 +111,10 @@ test('IM settings renders nine compact logo channel tabs without enable switches
   }));
 
   assert.match(markup, /IM机器人/);
-  assert.match(markup, /让聊天机器人轻松接入 DeepSeek Harness/);
+  assert.match(markup, /让 DeepSeek Harness 触手可及/);
   assert.match(markup, /class="dim-brand"/);
-  assert.match(markup, /<img class="dim-brandLogo" src="assets\/logo-icon\.png" alt="dsh-im" width="48" height="48"\/>/);
+  assert.match(markup, /<strong class="dim-brandName">DSH-IM<\/strong>/);
+  assert.doesNotMatch(markup, /dim-brandLogo|<img/);
   assert.match(markup, /href="https:\/\/github\.com\/xmanrui\/dsh-im"/);
   assert.match(markup, /target="_blank"/);
   assert.match(markup, /rel="noopener noreferrer"/);
@@ -121,9 +122,10 @@ test('IM settings renders nine compact logo channel tabs without enable switches
   assert.match(markup, /aria-describedby="[^"]+"/);
   assert.match(markup, /role="tooltip"[^>]*>帮助与反馈 · 前往 GitHub</);
   assert.match(styles, /\.dim-title \{[^}]*margin: 0 0 18px;/);
-  assert.match(styles, /\.dim-title p \{[^}]*color: var\(--dsw-alias-label-primary, #1f2329\);[^}]*font-size: 14px;[^}]*font-weight: 600;/);
-  assert.match(styles, /\.dim-brand \{[^}]*display: flex;[^}]*align-items: center;[^}]*gap: 12px;/);
-  assert.match(styles, /\.dim-brandLogo \{[^}]*width: 48px;[^}]*height: 48px;[^}]*object-fit: contain;[^}]*filter: grayscale\(1\) contrast\(1\.08\);/);
+  assert.match(styles, /\.dim-title p \{[^}]*color: var\(--dsw-alias-label-secondary, #646a73\);[^}]*font-size: 12px;[^}]*font-weight: 500;/);
+  assert.match(styles, /\.dim-brand \{[^}]*display: flex;[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*gap: 1px;/);
+  assert.match(styles, /\.dim-brandName \{[^}]*font-size: 20px;[^}]*font-weight: 800;[^}]*letter-spacing: \.04em;/);
+  assert.doesNotMatch(styles, /\.dim-brandLogo/);
   assert.match(styles, /\.dim-githubLink \{[^}]*border: 1px solid var\(--dsw-alias-border-l2, #dfe1e5\);[^}]*text-decoration: none;/);
   assert.match(styles, /\.dim-githubTooltip \{[^}]*bottom: calc\(100% \+ 8px\);[^}]*transform: translateY\(3px\);/);
   assert.match(styles, /\.dim-githubAction:hover \.dim-githubTooltip, \.dim-githubAction:focus-within \.dim-githubTooltip \{[^}]*opacity: 1;[^}]*visibility: visible;/);
@@ -497,8 +499,8 @@ test('all channel card action buttons stay on one row', async () => {
   assert.match(feishuStyles, /\.bxf-botActions \{[^}]*flex-wrap: nowrap;/);
   assert.match(weixinStyles, /\.dxw-accountFooter \.dxw-actions \{[^}]*flex-wrap: nowrap;/);
   assert.match(dingtalkStyles, /\.ddt-accountFooter \.ddt-actions \{[^}]*flex-wrap: nowrap;/);
-  assert.match(imStyles, /\.dim-panel \.dim-cardFooter \{[^}]*gap: 15px;[^}]*padding-top: 8px;[^}]*border-top: 1px solid/);
-  assert.match(imStyles, /\.dim-panel \.dim-cardActions \.dim-cardAction \{[^}]*min-height: 34px;[^}]*border-radius: 8px;[^}]*font-size: 13px;/);
+  assert.match(imStyles, /\.dim-panel \.dim-cardFooter \{[^}]*gap: 12px;[^}]*padding-top: 6px;[^}]*border-top: 1px solid/);
+  assert.match(imStyles, /\.dim-panel \.dim-cardActions \.dim-cardAction \{[^}]*min-height: 32px;[^}]*border-radius: 8px;[^}]*font-size: 13px;/);
   assert.match(imStyles, /\.dim-panel \.dim-cardActions \.dim-cardAction\[data-kind="danger"\] \{[^}]*#d54941/);
   assert.doesNotMatch(feishuStyles, /\.bxf-connectedFooter \{[^}]*flex-direction: column/);
   assert.doesNotMatch(weixinStyles, /\.dxw-accountFooter \{[^}]*flex-direction: column/);
@@ -509,14 +511,24 @@ test('all channel bot cards use the DingTalk card treatment', async () => {
   const styles = await readFile(STYLES_URL, 'utf8');
 
   assert.match(styles, /\.dim-panel \.dim-botCard \{[^}]*border-radius: 14px;[^}]*background: var\(--dsw-alias-bg-layer-1, #fff\);[^}]*box-shadow: 0 1px 2px/);
-  assert.match(styles, /\.dim-panel \.dim-botCardBody \{[^}]*padding: 14px;/);
-  assert.match(styles, /\.dim-panel \.dim-botCardTop \{[^}]*align-items: flex-start;[^}]*gap: 16px;/);
-  assert.match(styles, /\.dim-panel \.dim-botAvatar \{[^}]*width: 42px;[^}]*height: 42px;[^}]*border-radius: 12px;/);
+  assert.match(styles, /\.dim-panel \.dim-botCardBody \{[^}]*padding: 12px;/);
+  assert.match(styles, /\.dim-panel \.dim-botCardTop \{[^}]*align-items: flex-start;[^}]*gap: 12px;/);
+  assert.match(styles, /\.dim-panel \.dim-botAvatar \{[^}]*width: 38px;[^}]*height: 38px;[^}]*border-radius: 11px;/);
   assert.match(styles, /\.dim-panel \.dim-botName h3 \{[^}]*font-size: 15px;/);
   assert.match(styles, /\.dim-panel \.dim-botCard \.dim-botHealth \{[^}]*background: transparent;[^}]*font-size: 12px;[^}]*font-weight: 400;/);
-  assert.match(styles, /\.dim-panel \.dim-botMetrics \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);[^}]*gap: 10px;[^}]*margin: 8px 0;/);
-  assert.match(styles, /\.dim-panel \.dim-botMetric \{[^}]*padding: 8px;[^}]*border: 0;[^}]*border-radius: 9px;/);
-  assert.match(styles, /\.dim-panel \.dim-botMetric dd \{[^}]*margin: 5px 0 0;[^}]*font-size: 13px;[^}]*font-weight: 400;/);
+  assert.match(styles, /\.dim-panel \.dim-botMetrics \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);[^}]*gap: 8px;[^}]*margin: 6px 0;/);
+  assert.match(styles, /\.dim-panel \.dim-botMetric \{[^}]*padding: 6px 8px;[^}]*border: 0;[^}]*border-radius: 9px;/);
+  assert.match(styles, /\.dim-panel \.dim-botMetric dd \{[^}]*margin: 3px 0 0;[^}]*font-size: 12px;[^}]*font-weight: 400;/);
+});
+
+test('bot cards keep the full workspace path on its own single line', async () => {
+  const styles = await readFile(STYLES_URL, 'utf8');
+
+  assert.match(styles, /\.dim-panel \.dim-workspace \{[^}]*grid-template-columns: minmax\(0, 1fr\) max-content;[^}]*row-gap: 4px;[^}]*margin-top: 6px;[^}]*padding: 6px 10px;/);
+  assert.match(styles, /\.dim-panel \.dim-workspaceHeader \{[^}]*display: contents;/);
+  assert.match(styles, /\.dim-panel \.dim-workspacePath \{[^}]*grid-column: 1 \/ -1;[^}]*grid-row: 2;[^}]*overflow-x: auto;[^}]*white-space: nowrap;/);
+  assert.doesNotMatch(styles, /\.dim-panel \.dim-workspacePath \{[^}]*text-overflow: ellipsis;/);
+  assert.match(styles, /\.dim-panel \.dim-workspaceEdit \{[^}]*grid-column: 2;[^}]*grid-row: 1;[^}]*white-space: nowrap;/);
 });
 
 test('the bundled DingTalk channel has no local sender approval workflow', async () => {
@@ -629,7 +641,7 @@ test('client registers a live bilingual locale seat and directory picker for the
       registrations[0].component,
       injected,
     ));
-    assert.match(markup, /Connect IM bots to DeepSeek Harness with ease/);
+    assert.match(markup, /DeepSeek Harness, always within reach/);
     assert.match(markup, /Help &amp; feedback · Open GitHub/);
     assert.match(markup, />WeChat<|>Feishu<|>DingTalk<|>WeCom</);
     assert.match(markup, />QQ<[^]*>Slack<[^]*>Telegram<[^]*>Discord<[^]*>WhatsApp</);

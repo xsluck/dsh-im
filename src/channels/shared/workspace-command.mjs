@@ -13,7 +13,7 @@ const MAX_COMMAND_MESSAGE_LENGTH = 1_800;
 const MAX_SESSION_ID_LENGTH = 256;
 const UNSAFE_DISPLAY_TEXT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 const UNSAFE_DISPLAY_TEXT_GLOBAL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
-const SESSION_BIND_USAGE = '用法：/session Session ID';
+const SESSION_BIND_USAGE = '用法：/session Session ID 或当前工作区序号（/session N）';
 const SESSION_LIST_USAGE = [
   '用法：',
   '/sessionlist  列出当前工作区会话',
@@ -175,14 +175,35 @@ async function resolveSessionListWorkspace(selector, harness) {
   return selected;
 }
 
-function sessionListMessage(workspace, sessions) {
+function formatSessionRelativeTime(value) {
+  const ms = typeof value === 'number' && Number.isFinite(value) ? value : null;
+  if (ms === null) return '';
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  const hm = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const now = new Date();
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
+  if (dayDiff === 0) return `今天 ${hm}`;
+  if (dayDiff === 1) return `昨天 ${hm}`;
+  if (dayDiff === 2) return `前天 ${hm}`;
+  if (date.getFullYear() === now.getFullYear()) {
+    return `${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
+  }
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+function sessionListMessage(workspace, sessions, { currentWorkspace = false } = {}) {
   const rows = sessions.map((session) => {
     const sessionId = safeDisplayText(session?.sessionId);
     if (!sessionId) throw new TypeError('Harness returned an invalid session id');
     const title = session?.summaryAvailable === false
       ? '标题暂不可用'
       : safeDisplayText(session?.title) || '暂无标题';
-    return `${title}${session?.archived === true ? '（已归档）' : ''}\n   ID: ${sessionId}`;
+    const timeText = formatSessionRelativeTime(session?.time);
+    const annotation = `${timeText ? ` · ${timeText}` : ''}${session?.archived === true ? '（已归档）' : ''}`;
+    return `${title}${annotation}\n   ID: ${sessionId}`;
   });
   if (rows.length === 0) return `工作区：${workspace}\n该工作区暂无会话。`;
   return [
@@ -191,8 +212,17 @@ function sessionListMessage(workspace, sessions) {
     '',
     ...rows.map((row, index) => `${index + 1}. ${row}`),
     '',
-    '绑定用法：/session Session ID',
+    currentWorkspace
+      ? '绑定用法：/session Session ID 或当前工作区序号（/session N）'
+      : '绑定用法：/session Session ID\n提示：/session N 只按机器人当前工作区的序号绑定。',
   ].join('\n');
+}
+
+async function currentSessionListWorkspace(harness) {
+  if (typeof harness?.currentWorkspace !== 'function') return null;
+  const [current] = await existingWorkspacePaths([harness.currentWorkspace()]);
+  harness.assertWorkspaceScope?.();
+  return current ?? null;
 }
 
 async function runSessionListCommand(match, harness) {
@@ -209,7 +239,10 @@ async function runSessionListCommand(match, harness) {
     }
     harness.assertWorkspaceScope?.();
     const workspace = normalizedWorkspacePath(listed.workspace) ?? resolved.workspace;
-    const message = sessionListMessage(workspace, listed.sessions);
+    const currentWorkspace = await currentSessionListWorkspace(harness);
+    const message = sessionListMessage(workspace, listed.sessions, {
+      currentWorkspace: workspace === currentWorkspace,
+    });
     return commandResult(message, splitWorkspaceCommandMessage(message));
   } catch (error) {
     if (error?.code === 'workspace-bot-not-found') {
@@ -247,7 +280,38 @@ function sessionBindErrorMessage(error) {
 
 async function runSessionBindCommand(command, harness, conversationKey) {
   const match = SESSION_BIND_COMMAND.exec(command);
-  const sessionId = match?.[1];
+  let sessionId = match?.[1];
+  if (typeof sessionId === 'string' && /^\d+$/u.test(sessionId)) {
+    // 序号模式：把 /session N 解析成当前工作区会话列表中的第 N 个会话
+    if (typeof harness?.listWorkspaceSessions !== 'function'
+      || typeof harness?.currentWorkspace !== 'function') {
+      return commandResult('当前机器人暂不支持按序号绑定，请使用 /session Session ID。');
+    }
+    try {
+      const selected = await selectedWorkspacePath(harness.currentWorkspace());
+      if (selected.error) return commandResult(selected.error);
+      const listed = await harness.listWorkspaceSessions(selected.workspace);
+      if (!listed || !Array.isArray(listed.sessions)) {
+        throw new TypeError('Harness returned an invalid workspace session list');
+      }
+      harness.assertWorkspaceScope?.();
+      const position = Number(sessionId);
+      if (!Number.isSafeInteger(position) || position < 1
+        || position > listed.sessions.length) {
+        return commandResult('会话序号不存在，请先执行 /sessionlist 查看序号。');
+      }
+      const selectedSessionId = listed.sessions[position - 1]?.sessionId;
+      if (!validSessionId(selectedSessionId)) {
+        throw new TypeError('Harness returned an invalid session id');
+      }
+      sessionId = selectedSessionId;
+    } catch (error) {
+      if (error?.code === 'workspace-bot-not-found') {
+        return commandResult(sessionBindErrorMessage(error));
+      }
+      return commandResult('暂时无法获取会话列表，请稍后重试。');
+    }
+  }
   if (!validSessionId(sessionId)) return commandResult(SESSION_BIND_USAGE);
   if (typeof harness?.bindWorkspaceSession !== 'function') {
     return commandResult('当前机器人暂不支持绑定已有会话。');
