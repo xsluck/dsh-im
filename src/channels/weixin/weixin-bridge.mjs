@@ -121,7 +121,9 @@ export class WeixinHarnessBridge {
     maxMessageChars = 4_000,
     signal,
   }) {
-    if (!api || typeof api.sendText !== 'function') throw new TypeError('Weixin API is required');
+    if (!api || typeof api.sendText !== 'function' && typeof api.sendImage !== 'function') {
+      throw new TypeError('Weixin API must have sendText or sendImage method');
+    }
     if (!baseUrl || !token || !ownerUserId) throw new TypeError('Weixin account credentials are required');
     if (!harness || !state) throw new TypeError('Harness client and state store are required');
     this.#api = api;
@@ -883,7 +885,18 @@ export class WeixinHarnessBridge {
   }
 
   async #send(toUserId, text, contextToken, runId) {
-    for (const chunk of splitWeixinText(text, this.#maxMessageChars)) {
+    // Send images first if present in the answer
+    const imageUrls = this.#extractImageUrls(text);
+    for (const imgUrl of imageUrls) {
+      try {
+        await this.#sendImage(toUserId, imgUrl, contextToken, runId);
+      } catch (err) {
+        this.#logger.error?.(`[dsh-weixin] failed to send image ${imgUrl}:`, err);
+      }
+    }
+    // Send text (with image markdown removed)
+    const textOnly = this.#removeImageMd(text);
+    for (const chunk of splitWeixinText(textOnly, this.#maxMessageChars)) {
       await this.#api.sendText({
         baseUrl: this.#baseUrl,
         token: this.#token,
@@ -893,5 +906,39 @@ export class WeixinHarnessBridge {
         runId,
       });
     }
+  }
+
+  async #sendImage(toUserId, imageUrl, contextToken, runId) {
+    if (typeof this.#api.sendImage !== 'function') {
+      throw new Error('sendImage not supported by API');
+    }
+    const resp = await fetch(imageUrl, { signal: this.#signal });
+    if (!resp.ok) throw new Error(`Failed to fetch image: ${resp.status}`);
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    await this.#api.sendImage({
+      baseUrl: this.#baseUrl,
+      token: this.#token,
+      toUserId,
+      imageData: buffer,
+      contextToken,
+      runId,
+      signal: this.#signal,
+    });
+  }
+
+  #extractImageUrls(text) {
+    if (typeof text !== 'string') return [];
+    const urls = [];
+    const mdImgRegex = /!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g;
+    let match;
+    while ((match = mdImgRegex.exec(text)) !== null) {
+      urls.push(match[1]);
+    }
+    return [...new Set(urls)];
+  }
+
+  #removeImageMd(text) {
+    if (typeof text !== 'string') return text;
+    return text.replace(/!\[[^\]]*\]\([^)]+\)/g, '').trim();
   }
 }
