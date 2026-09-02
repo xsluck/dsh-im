@@ -44,14 +44,17 @@ const CSS = String.raw`
 .dim-logoWecom svg { width: 22px; height: 22px; }
 .dim-logoTelegram { color: white; background: #229ed9; }
 .dim-logoTelegram svg { width: 21px; height: 21px; }
+.dim-logoOffice { color: white; background: linear-gradient(145deg, #12213f, #3964fe); }
+.dim-logoOffice svg { width: 23px; height: 23px; }
 .dim-logoDiscord { color: white; background: #5865f2; }
 .dim-logoDiscord svg { width: 21px; height: 21px; }
 .dim-logoSlack { color: white; background: #4a154b; }
 .dim-logoSlack svg { width: 21px; height: 21px; }
 .dim-logoWhatsapp { color: white; background: #25d366; }
 .dim-logoWhatsapp svg { width: 21px; height: 21px; }
-.dim-channelCopy { min-width: 0; display: block; }
+.dim-channelCopy { min-width: 0; display: grid; }
 .dim-channelCopy strong { overflow: hidden; color: inherit; font-size: 14px; line-height: 20px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+.dim-channelNote { overflow: hidden; color: var(--dsw-alias-label-tertiary, #8f959e); font-size: 10px; line-height: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .dim-divider { width: 1px; min-height: 520px; background: var(--dsw-alias-border-l1, #eef0f3); }
 .dim-panel { min-width: 0; container-type: inline-size; }
 .dim-panel .bxf-page, .dim-panel .dxw-page, .dim-panel .ddt-page, .dim-panel .dqq-page, .dim-panel .dwecom-page, .dim-panel .dsl-page, .dim-panel .dwa-page { width: 100%; max-width: none; padding: 0 0 24px; }
