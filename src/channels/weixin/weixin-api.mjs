@@ -477,7 +477,31 @@ export function createWeixinApi({ fetchImpl = fetch } = {}) {
         signal,
       });
 
-      // Step 3: Send image message
+      // Step 3: Send text message first (if provided)
+      if (text) {
+        await requestJson(fetchImpl, {
+          method: 'POST',
+          baseUrl,
+          endpoint: 'ilink/bot/sendmessage',
+          token,
+          signal,
+          body: {
+            msg: {
+              from_user_id: '',
+              to_user_id: recipient,
+              client_id: `dsh-weixin-${randomUUID()}`,
+              message_type: 2,
+              message_state: 2,
+              item_list: [{ type: 1, text_item: { text } }],
+              ...(nonEmptyString(contextToken) ? { context_token: contextToken.trim() } : {}),
+              ...(nonEmptyString(runId) ? { run_id: runId.trim() } : {}),
+            },
+            base_info: baseInfo(),
+          },
+        });
+      }
+
+      // Step 4: Send image message
       const response = await requestJson(fetchImpl, {
         method: 'POST',
         baseUrl,
@@ -492,7 +516,6 @@ export function createWeixinApi({ fetchImpl = fetch } = {}) {
             message_type: 2,
             message_state: 2,
             item_list: [
-              ...(text ? [{ type: 1, text_item: { text } }] : []),
               {
                 type: 2, // IMAGE
                 image_item: {
