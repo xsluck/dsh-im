@@ -164,6 +164,7 @@ async function getUploadUrl(fetchImpl, { baseUrl, token, filekey, mediaType, toU
       filesize,
       no_need_thumb: true,
       aeskey: aeskey.toString('hex'),
+      base_info: baseInfo(),
     },
   });
 
@@ -521,7 +522,7 @@ export function createWeixinApi({ fetchImpl = fetch } = {}) {
                 image_item: {
                   media: {
                     encrypt_query_param: downloadParam,
-                    aes_key: aeskey.toString('base64'),
+                    aes_key: Buffer.from(aeskey.toString('hex')).toString('base64'),
                     encrypt_type: 1,
                   },
                   mid_size: uploadInfo.filesize,
@@ -596,7 +597,7 @@ export function createWeixinApi({ fetchImpl = fetch } = {}) {
                 video_item: {
                   media: {
                     encrypt_query_param: downloadParam,
-                    aes_key: aeskey.toString('base64'),
+                    aes_key: Buffer.from(aeskey.toString('hex')).toString('base64'),
                     encrypt_type: 1,
                   },
                   video_size: uploadInfo.filesize,
@@ -672,7 +673,7 @@ export function createWeixinApi({ fetchImpl = fetch } = {}) {
                 file_item: {
                   media: {
                     encrypt_query_param: downloadParam,
-                    aes_key: aeskey.toString('base64'),
+                    aes_key: Buffer.from(aeskey.toString('hex')).toString('base64'),
                     encrypt_type: 1,
                   },
                   file_name: fileName,
