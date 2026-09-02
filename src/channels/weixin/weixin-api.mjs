@@ -518,6 +518,158 @@ export function createWeixinApi({ fetchImpl = fetch } = {}) {
       return true;
     },
 
+    async sendVideo({ baseUrl, token, toUserId, videoData, text, contextToken, runId, signal }) {
+      const recipient = nonEmptyString(toUserId);
+      if (!recipient) throw new TypeError('toUserId is required');
+
+      let plaintext;
+      if (typeof videoData === 'string') {
+        plaintext = Buffer.from(videoData, 'base64');
+      } else if (videoData instanceof Uint8Array) {
+        plaintext = Buffer.from(videoData);
+      } else if (Buffer.isBuffer(videoData)) {
+        plaintext = videoData;
+      } else {
+        throw new TypeError('videoData must be a Buffer, Uint8Array, or base64 string');
+      }
+
+      if (plaintext.length === 0) throw new TypeError('videoData cannot be empty');
+      if (plaintext.length > 100 * 1024 * 1024) {
+        throw new WeixinApiError('video-too-large', '视频大小超过 100 MB 限制');
+      }
+
+      const filekey = randomBytes(16).toString('hex');
+      const aeskey = randomBytes(16);
+
+      const uploadInfo = await getUploadUrl(fetchImpl, {
+        baseUrl, token, filekey,
+        mediaType: 2, // VIDEO
+        toUserId: recipient,
+        plaintext, aeskey, signal,
+      });
+
+      const { downloadParam } = await uploadToCdn(fetchImpl, {
+        plaintext, aeskey,
+        uploadFullUrl: uploadInfo.uploadFullUrl,
+        uploadParam: uploadInfo.uploadParam,
+        filekey, signal,
+      });
+
+      const response = await requestJson(fetchImpl, {
+        method: 'POST',
+        baseUrl, endpoint: 'ilink/bot/sendmessage',
+        token, signal,
+        body: {
+          msg: {
+            from_user_id: '',
+            to_user_id: recipient,
+            client_id: `dsh-weixin-${randomUUID()}`,
+            message_type: 2,
+            message_state: 2,
+            item_list: [
+              ...(text ? [{ type: 1, text_item: { text } }] : []),
+              {
+                type: 5, // VIDEO
+                video_item: {
+                  media: {
+                    encrypt_query_param: downloadParam,
+                    aes_key: aeskey.toString('base64'),
+                    encrypt_type: 1,
+                  },
+                  video_size: uploadInfo.filesize,
+                },
+              },
+            ],
+            ...(nonEmptyString(contextToken) ? { context_token: contextToken.trim() } : {}),
+            ...(nonEmptyString(runId) ? { run_id: runId.trim() } : {}),
+          },
+          base_info: baseInfo(),
+        },
+      });
+
+      if (response?.ret !== undefined && response.ret !== 0) {
+        throw new WeixinApiError('send-rejected', '微信服务拒绝了回复消息。');
+      }
+      return true;
+    },
+
+    async sendFile({ baseUrl, token, toUserId, fileData, fileName, text, contextToken, runId, signal }) {
+      const recipient = nonEmptyString(toUserId);
+      if (!recipient) throw new TypeError('toUserId is required');
+      if (!fileName) throw new TypeError('fileName is required');
+
+      let plaintext;
+      if (typeof fileData === 'string') {
+        plaintext = Buffer.from(fileData, 'base64');
+      } else if (fileData instanceof Uint8Array) {
+        plaintext = Buffer.from(fileData);
+      } else if (Buffer.isBuffer(fileData)) {
+        plaintext = fileData;
+      } else {
+        throw new TypeError('fileData must be a Buffer, Uint8Array, or base64 string');
+      }
+
+      if (plaintext.length === 0) throw new TypeError('fileData cannot be empty');
+      if (plaintext.length > 200 * 1024 * 1024) {
+        throw new WeixinApiError('file-too-large', '文件大小超过 200 MB 限制');
+      }
+
+      const filekey = randomBytes(16).toString('hex');
+      const aeskey = randomBytes(16);
+
+      const uploadInfo = await getUploadUrl(fetchImpl, {
+        baseUrl, token, filekey,
+        mediaType: 3, // FILE
+        toUserId: recipient,
+        plaintext, aeskey, signal,
+      });
+
+      const { downloadParam } = await uploadToCdn(fetchImpl, {
+        plaintext, aeskey,
+        uploadFullUrl: uploadInfo.uploadFullUrl,
+        uploadParam: uploadInfo.uploadParam,
+        filekey, signal,
+      });
+
+      const response = await requestJson(fetchImpl, {
+        method: 'POST',
+        baseUrl, endpoint: 'ilink/bot/sendmessage',
+        token, signal,
+        body: {
+          msg: {
+            from_user_id: '',
+            to_user_id: recipient,
+            client_id: `dsh-weixin-${randomUUID()}`,
+            message_type: 2,
+            message_state: 2,
+            item_list: [
+              ...(text ? [{ type: 1, text_item: { text } }] : []),
+              {
+                type: 4, // FILE
+                file_item: {
+                  media: {
+                    encrypt_query_param: downloadParam,
+                    aes_key: aeskey.toString('base64'),
+                    encrypt_type: 1,
+                  },
+                  file_name: fileName,
+                  len: String(uploadInfo.rawsize),
+                },
+              },
+            ],
+            ...(nonEmptyString(contextToken) ? { context_token: contextToken.trim() } : {}),
+            ...(nonEmptyString(runId) ? { run_id: runId.trim() } : {}),
+          },
+          base_info: baseInfo(),
+        },
+      });
+
+      if (response?.ret !== undefined && response.ret !== 0) {
+        throw new WeixinApiError('send-rejected', '微信服务拒绝了回复消息。');
+      }
+      return true;
+    },
+
     async notifyStart({ baseUrl, token, signal }) {
       const response = await requestJson(fetchImpl, {
         method: 'POST',

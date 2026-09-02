@@ -894,8 +894,26 @@ export class WeixinHarnessBridge {
         this.#logger.error?.(`[dsh-weixin] failed to send image ${imgUrl}:`, err);
       }
     }
-    // Send text (with image markdown removed)
-    const textOnly = this.#removeImageMd(text);
+    // Send videos if present
+    const videoUrls = this.#extractVideoUrls(text);
+    for (const videoUrl of videoUrls) {
+      try {
+        await this.#sendVideo(toUserId, videoUrl, contextToken, runId);
+      } catch (err) {
+        this.#logger.error?.(`[dsh-weixin] failed to send video ${videoUrl}:`, err);
+      }
+    }
+    // Send files if present
+    const fileUrls = this.#extractFileUrls(text);
+    for (const [fileUrl, fileName] of fileUrls) {
+      try {
+        await this.#sendFile(toUserId, fileUrl, fileName, contextToken, runId);
+      } catch (err) {
+        this.#logger.error?.(`[dsh-weixin] failed to send file ${fileUrl}:`, err);
+      }
+    }
+    // Send text (with media markdown removed)
+    const textOnly = this.#removeMediaMd(text);
     for (const chunk of splitWeixinText(textOnly, this.#maxMessageChars)) {
       await this.#api.sendText({
         baseUrl: this.#baseUrl,
@@ -926,6 +944,45 @@ export class WeixinHarnessBridge {
     });
   }
 
+  async #sendVideo(toUserId, videoUrl, contextToken, runId) {
+    if (typeof this.#api.sendVideo !== 'function') {
+      throw new Error('sendVideo not supported by API');
+    }
+    const fileName = this.#getFileName(videoUrl, 'video.mp4');
+    const resp = await fetch(videoUrl, { signal: this.#signal });
+    if (!resp.ok) throw new Error(`Failed to fetch video: ${resp.status}`);
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    await this.#api.sendVideo({
+      baseUrl: this.#baseUrl,
+      token: this.#token,
+      toUserId,
+      videoData: buffer,
+      fileName,
+      contextToken,
+      runId,
+      signal: this.#signal,
+    });
+  }
+
+  async #sendFile(toUserId, fileUrl, fileName, contextToken, runId) {
+    if (typeof this.#api.sendFile !== 'function') {
+      throw new Error('sendFile not supported by API');
+    }
+    const resp = await fetch(fileUrl, { signal: this.#signal });
+    if (!resp.ok) throw new Error(`Failed to fetch file: ${resp.status}`);
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    await this.#api.sendFile({
+      baseUrl: this.#baseUrl,
+      token: this.#token,
+      toUserId,
+      fileData: buffer,
+      fileName,
+      contextToken,
+      runId,
+      signal: this.#signal,
+    });
+  }
+
   #extractImageUrls(text) {
     if (typeof text !== 'string') return [];
     const urls = [];
@@ -937,8 +994,59 @@ export class WeixinHarnessBridge {
     return [...new Set(urls)];
   }
 
-  #removeImageMd(text) {
+  #extractVideoUrls(text) {
+    if (typeof text !== 'string') return [];
+    const urls = [];
+    const videoExtensions = /\.(mp4|mov|avi|mkv|flv|webm)(\?[^)]*)?$/i;
+    const linkRegex = /\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
+    let match;
+    while ((match = linkRegex.exec(text)) !== null) {
+      const url = match[2];
+      if (videoExtensions.test(url)) {
+        urls.push(url);
+      }
+    }
+    return [...new Set(urls)];
+  }
+
+  #extractFileUrls(text) {
+    if (typeof text !== 'string') return [];
+    const urls = [];
+    const fileExtensions = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|txt|csv|json|xml)(\?[^)]*)?$/i;
+    const linkRegex = /\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
+    let match;
+    while ((match = linkRegex.exec(text)) !== null) {
+      const url = match[2];
+      const fileName = match[1] || this.#getFileName(url, 'file');
+      if (fileExtensions.test(url)) {
+        urls.push([url, fileName]);
+      }
+    }
+    return [...new Set(urls)];
+  }
+
+  #getFileName(url, defaultName) {
+    try {
+      const pathname = new URL(url).pathname;
+      const basename = pathname.split('/').pop();
+      if (basename && basename.includes('.')) return basename;
+    } catch {
+      // ignore invalid URLs
+    }
+    return defaultName;
+  }
+
+  #removeMediaMd(text) {
     if (typeof text !== 'string') return text;
-    return text.replace(/!\[[^\]]*\]\([^)]+\)/g, '').trim();
+    // Remove image markdown ![](url)
+    let result = text.replace(/!\[[^\]]*\]\([^)]+\)/g, '');
+    // Remove video/link markdown [text](url) where url is video or file
+    const videoExt = /\.(mp4|mov|avi|mkv|flv|webm)(\?[^)]*)?$/i;
+    const fileExt = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|txt|csv|json|xml)(\?[^)]*)?$/i;
+    result = result.replace(/\[[^\]]*\]\((https?:\/\/[^)]+)\)/g, (match, url) => {
+      if (videoExt.test(url) || fileExt.test(url)) return '';
+      return match;
+    });
+    return result.trim();
   }
 }
